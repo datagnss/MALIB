@@ -481,8 +481,7 @@ extern int tle_name_read(const char *file, tle_t *tle)
             continue;
         }
         if (!*tle->data[i].name) {
-            strncpy(tle->data[i].name,name,31);
-            tle->data[i].name[31]='\0';
+            sprintf(tle->data[i].name,"%.31s",name);
         }
         else {
             data=tle->data[i];

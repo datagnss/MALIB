@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * lambda.c : integer ambiguity resolution
 *
-*          Copyright (C) 2007-2008 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2021 by T.TAKASU, All rights reserved.
 *
 * reference :
 *     [1] P.J.G.Teunissen, The least-square ambiguity decorrelation adjustment:
@@ -13,12 +13,13 @@
 * version : $Revision: 1.1 $ $Date: 2008/07/17 21:48:06 $
 * history : 2007/01/13 1.0 new
 *           2015/05/31 1.1 add api lambda_reduction(), lambda_search()
+*           2021/02/03 1.2 modify constant LOOPMAX 10000 -> 80000
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
 /* constants/macros ----------------------------------------------------------*/
 
-#define LOOPMAX     10000           /* maximum count of search loop */
+#define LOOPMAX     80000           /* maximum count of search loop */
 
 #define SGN(x)      ((x)<=0.0?-1.0:1.0)
 #define ROUND(x)    (floor((x)+0.5))

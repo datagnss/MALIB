@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * notvatel.c : NovAtel OEM7/OEM6/OEM5/OEM4/OEM3 receiver functions
 *
-*          Copyright (C) 2007-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2023 by T.TAKASU, All rights reserved.
 *
 * reference :
 *     [1] NovAtel, OM-20000094 Rev6 OEMV Family Firmware Reference Manual, 2008
@@ -12,6 +12,8 @@
 *     [5] NovAtel, OM-20000129 Rev6 OEM6 Family Firmware Reference Manual, 2014
 *     [6] NovAtel, OM-20000169 v15C OEM7 Commands and Logs Reference Manual,
 *         June 2020
+*     [7] NovAtel, OM-20000169 v24  OEM7 Commands and Logs Reference Manual,
+*         July 2023
 *
 * version : $Revision: 1.2 $ $Date: 2008/07/14 00:05:05 $
 * history : 2007/10/08 1.0 new
@@ -53,7 +55,7 @@
 *                           improve unchange-test of beidou ephemeris
 *           2017/06/15 1.15 add output half-cycle-ambiguity status to LLI
 *                           improve slip-detection by lock-time rollback
-*           2018/10/10 1.16 fix problem on data souce for galileo ephemeris
+*           2018/10/10 1.16 fix problem on data source for galileo ephemeris
 *                           output L2W instead of L2D for L2Pcodeless
 *                           test toc difference to output beidou ephemeris
 *           2019/05/10 1.17 save galileo E5b data to obs index 2
@@ -73,6 +75,14 @@
 *                           use API sat2freq() to get carrier-frequency
 *                           use API code2idx() to get freq-index
 *                           use integer types in stdint.h
+*           2021/01/04 1.19 support reading of sva and flags in GLOEPHEMERISB
+*           2021/02/01 1.20 support BDS satno in RANGEB/RANGECMPB for Tersus BX
+*           2021/06/19 1.21 support message GPSEPHEMB and QZSSEPHEMERISB
+*                           support Galileo E1B code in RANGEB and RANGECMPB
+*                           fix typos
+*           2023/01/12 1.22 support ephemeris type in eph_t
+*           2024/02/01 1.23 branch from ver.2.4.3b35 for MALIB 
+*                           support message GALINAVEPHEMERISB (ref [7])
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -92,12 +102,15 @@
 #define ID_IONUTC       8       /* oem7/6/4 iono and utc data */
 #define ID_RAWWAASFRAME 287     /* oem7/6/4 raw waas frame */
 #define ID_RAWSBASFRAME 973     /* oem7/6 raw sbas frame */
+#define ID_GPSEPHEM     7       /* oem7/6/4 decoded gps ephemeris */
 #define ID_GLOEPHEMERIS 723     /* oem7/6/4 glonass ephemeris */
 #define ID_GALEPHEMERIS 1122    /* oem7/6 decoded galileo ephemeris */
+#define ID_GALINAVEPHEMERIS 1309/* oem7/6 decoded galileo inav ephemeris */
 #define ID_GALIONO      1127    /* oem7/6 decoded galileo iono corrections */
 #define ID_GALCLOCK     1121    /* oem7/6 galileo clock information */
 #define ID_QZSSRAWEPHEM 1331    /* oem7/6 qzss raw ephemeris */
 #define ID_QZSSRAWSUBFRAME 1330 /* oem7/6 qzss raw subframe */
+#define ID_QZSSEPHEMERIS 1336   /* oem7/6 decoded qzss ephemeris */
 #define ID_QZSSIONUTC   1347    /* oem7/6 qzss ion/utc parameters */
 #define ID_BDSEPHEMERIS 1696    /* oem7/6 decoded bds ephemeris */
 #define ID_NAVICEPHEMERIS 2123  /* oem7 decoded navic ephemeris */
@@ -218,6 +231,7 @@ static int sig2code(int sys, int sigtype)
     }
     else if (sys==SYS_GAL) {
         switch (sigtype) {
+            case  1: return CODE_L1B; /* E1B  (OEM6) */
             case  2: return CODE_L1C; /* E1C  (OEM6) */
             case  6: return CODE_L6B; /* E6B  (OEM7) */
             case  7: return CODE_L6C; /* E6C  (OEM7) */
@@ -380,11 +394,16 @@ static int decode_rangecmpb(raw_t *raw)
             continue;
         }
         prn=U1(p+17);
-        if (sys==SYS_GLO) prn-=37;
-        if (sys==SYS_SBS&&prn>=MINPRNQZS_S&&prn<=MAXPRNQZS_S&&code==CODE_L1C) {
+        if (sys==SYS_GLO) {
+            prn-=37;
+        }
+        else if (sys==SYS_SBS&&prn>=MINPRNQZS_S&&prn<=MAXPRNQZS_S&&code==CODE_L1C) {
             sys=SYS_QZS;
             prn+=10;
             code=CODE_L1Z; /* QZS L1S */
+        }
+        else if (sys==SYS_CMP&&prn>=161&&prn<=197) {
+            prn-=160; /* Tersus BX */
         }
         if (!(sat=satno(sys,prn))) {
             trace(3,"oem4 rangecmpb satellite number error: sys=%d,prn=%d\n",sys,prn);
@@ -464,11 +483,16 @@ static int decode_rangeb(raw_t *raw)
             continue;
         }
         prn=U2(p);
-        if (sys==SYS_GLO) prn-=37;
-        if (sys==SYS_SBS&&prn>=MINPRNQZS_S&&prn<=MAXPRNQZS_S&&code==CODE_L1C) {
+        if (sys==SYS_GLO) {
+            prn-=37;
+        }
+        else if (sys==SYS_SBS&&prn>=MINPRNQZS_S&&prn<=MAXPRNQZS_S&&code==CODE_L1C) {
             sys=SYS_QZS;
             prn+=10;
             code=CODE_L1Z; /* QZS L1S */
+        }
+        else if (sys==SYS_CMP&&prn>=161&&prn<=197) {
+            prn-=160; /* Tersus BX */
         }
         if (!(sat=satno(sys,prn))) {
             trace(3,"oem4 rangeb satellite number error: sys=%d,prn=%d\n",sys,prn);
@@ -528,7 +552,7 @@ static int decode_rawephemb(raw_t *raw)
     eph_t eph={0};
     uint8_t *p=raw->buff+OEM4HLEN,subframe[30*5]={0};
     int prn,sat;
-    
+
     if (raw->len<OEM4HLEN+102) {
         trace(2,"oem4 rawephemb length error: len=%d\n",raw->len);
         return -1;
@@ -606,13 +630,90 @@ static int decode_rawsbasframeb(raw_t *raw)
 {
     return decode_rawwaasframeb(raw);
 }
+/* decode GPSEPHEMB ----------------------------------------------------------*/
+static int decode_gpsephemb(raw_t *raw)
+{
+    eph_t eph={0};
+    uint8_t *p=raw->buff+OEM4HLEN;
+    double tow,toc,ura;
+    int prn,sat,week,iode2,N;
+    
+    if (raw->len<OEM4HLEN+224) {
+        trace(2,"oem4 gpsephemb length error: len=%d\n",raw->len);
+        return -1;
+    }
+    prn       =U4(p);   p+=4;
+    tow       =R8(p);   p+=8;
+    eph.svh   =U4(p);   p+=4;
+    eph.iode  =U4(p);   p+=4; /* IODE1 */
+    iode2     =U4(p);   p+=4; /* IODE2 */
+    eph.week  =U4(p);   p+=4; /* toe week */
+    week      =U4(p);   p+=4; /* z-count week */
+    eph.toes  =R8(p);   p+=8;
+    eph.A     =R8(p);   p+=8;
+    eph.deln  =R8(p);   p+=8;
+    eph.M0    =R8(p);   p+=8;
+    eph.e     =R8(p);   p+=8;
+    eph.omg   =R8(p);   p+=8;
+    eph.cuc   =R8(p);   p+=8;
+    eph.cus   =R8(p);   p+=8;
+    eph.crc   =R8(p);   p+=8;
+    eph.crs   =R8(p);   p+=8;
+    eph.cic   =R8(p);   p+=8;
+    eph.cis   =R8(p);   p+=8;
+    eph.i0    =R8(p);   p+=8;
+    eph.idot  =R8(p);   p+=8;
+    eph.OMG0  =R8(p);   p+=8;
+    eph.OMGd  =R8(p);   p+=8;
+    eph.iodc  =U4(p);   p+=4;
+    toc       =R8(p);   p+=8;
+    eph.tgd[0]=R8(p);   p+=8; /* TGD */
+    eph.f0    =R8(p);   p+=8;
+    eph.f1    =R8(p);   p+=8;
+    eph.f2    =R8(p);   p+=8;
+    eph.code  =U4(p);   p+=4; /* AS on */
+    N         =R8(p);   p+=8;
+    ura       =R8(p);
+    
+    if (toc!=eph.toes) { /* toe and toc should be matched */
+        trace(2,"oem4 gpsephemb toe and toc unmatch prn=%d\n",prn);
+        return -1;
+    }
+    if (iode2!=eph.iode) { /* iodes should be matched */
+        trace(2,"oem4 gpsephemb iode unmatch prn=%d iode=%d %d\n",prn,eph.iode,
+              iode2);
+        return -1;
+    }
+    if (!(sat=satno(SYS_GPS,prn))) {
+        trace(2,"oemv gpsephemb satellite error: prn=%d\n",prn);
+        return 0;
+    }
+    if (raw->outtype) {
+        sprintf(raw->msgtype+strlen(raw->msgtype)," prn=%d",prn);
+    }
+    eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
+    eph.sva=uraindex((ura<=0.0)?6144.0:sqrt(ura));
+    eph.toe=gpst2time(eph.week,eph.toes);
+    eph.toc=gpst2time(eph.week,toc);
+    eph.ttr=raw->time;
+    
+    if (!strstr(raw->opt,"-EPHALL")) {
+        if (timediff(raw->nav.eph[sat-1].toe,eph.toe)==0.0&&
+            raw->nav.eph[sat-1].iode==eph.iode) return 0; /* unchanged */
+    }
+    raw->nav.eph[sat-1]=eph;
+    raw->ephsat=sat;
+    raw->ephset=0;
+    return 2;
+}
 /* decode GLOEPHEMERISB ------------------------------------------------------*/
 static int decode_gloephemerisb(raw_t *raw)
 {
     uint8_t *p=raw->buff+OEM4HLEN;
     geph_t geph={0};
     double tow,tof,toff;
-    int prn,sat,week;
+    int prn,sat,week,type,P,flags;
     
     if (raw->len<OEM4HLEN+144) {
         trace(2,"oem4 gloephemerisb length error: len=%d\n",raw->len);
@@ -628,6 +729,7 @@ static int decode_gloephemerisb(raw_t *raw)
         sprintf(raw->msgtype+strlen(raw->msgtype)," prn=%d",prn);
     }
     geph.frq   =U2(p+  2)+OFF_FRQNO;
+    type       =U1(p+  4); /* 0:GLO,1:GLO-M,2:GLO-K */
     week       =U2(p+  6);
     tow        =floor(U4(p+8)/1000.0+0.5); /* rounded to integer sec */
     toff       =U4(p+ 12);
@@ -646,7 +748,11 @@ static int decode_gloephemerisb(raw_t *raw)
     geph.dtaun =R8(p+108);
     geph.gamn  =R8(p+116);
     tof        =U4(p+124)-toff; /* glonasst->gpst */
+    P          =U4(p+128)&3;
+    geph.sva   =U4(p+132); /* F_T */
     geph.age   =U4(p+136);
+    flags      =U4(p+140); /* P3(1)+P2(1)+P1(2) */
+    geph.flags=(((type>=1)?1:0)<<7)+(flags<<2)+P;
     geph.toe=gpst2time(week,tow);
     tof+=floor(tow/86400.0)*86400;
     if      (tof<tow-43200.0) tof+=86400.0;
@@ -670,7 +776,7 @@ static int decode_qzssrawephemb(raw_t *raw)
     uint8_t *p=raw->buff+OEM4HLEN,subfrm[90];
     int prn,sat;
     
-    if (raw->len<OEM4HLEN+106) {
+    if (raw->len<OEM4HLEN+102) {
         trace(2,"oem4 qzssrawephemb length error: len=%d\n",raw->len);
         return -1;
     }
@@ -745,6 +851,83 @@ static int decode_qzssrawsubframeb(raw_t *raw)
         return 9;
     }
     return 0;
+}
+/* decode QZSSEPHEMERISB -----------------------------------------------------*/
+static int decode_qzssephemerisb(raw_t *raw)
+{
+    eph_t eph={0};
+    uint8_t *p=raw->buff+OEM4HLEN;
+    double tow,toc,ura;
+    int prn,sat,week,iode2,as,N,fit;
+    
+    if (raw->len<OEM4HLEN+228) {
+        trace(2,"oem4 qzssephemerisb length error: len=%d\n",raw->len);
+        return -1;
+    }
+    prn       =U4(p);   p+=4;
+    tow       =R8(p);   p+=8;
+    eph.svh   =U4(p);   p+=4;
+    eph.iode  =U4(p);   p+=4; /* IODE1 */
+    iode2     =U4(p);   p+=4; /* IODE2 */
+    eph.week  =U4(p);   p+=4; /* toe week */
+    week      =U4(p);   p+=4; /* z-count week */
+    eph.toes  =R8(p);   p+=8;
+    eph.A     =R8(p);   p+=8;
+    eph.deln  =R8(p);   p+=8;
+    eph.M0    =R8(p);   p+=8;
+    eph.e     =R8(p);   p+=8;
+    eph.omg   =R8(p);   p+=8;
+    eph.cuc   =R8(p);   p+=8;
+    eph.cus   =R8(p);   p+=8;
+    eph.crc   =R8(p);   p+=8;
+    eph.crs   =R8(p);   p+=8;
+    eph.cic   =R8(p);   p+=8;
+    eph.cis   =R8(p);   p+=8;
+    eph.i0    =R8(p);   p+=8;
+    eph.idot  =R8(p);   p+=8;
+    eph.OMG0  =R8(p);   p+=8;
+    eph.OMGd  =R8(p);   p+=8;
+    eph.iodc  =U4(p);   p+=4;
+    toc       =R8(p);   p+=8;
+    eph.tgd[0]=R8(p);   p+=8; /* TGD */
+    eph.f0    =R8(p);   p+=8;
+    eph.f1    =R8(p);   p+=8;
+    eph.f2    =R8(p);   p+=8;
+    as        =U4(p);   p+=4;
+    N         =R8(p);   p+=8;
+    ura       =R8(p);   p+=8;
+    fit       =U1(p);
+    
+    if (iode2!=eph.iode) { /* iodes should be matched */
+        trace(2,"oem4 qzssephemerisb iode unmatch prn=%d iode=%d %d\n",prn,eph.iode,
+              iode2);
+        return -1;
+    }
+    if (!(sat=satno(SYS_QZS,prn))) {
+        trace(2,"oemv qzssephemerisb satellite error: prn=%d\n",prn);
+        return 0;
+    }
+    if (raw->outtype) {
+        sprintf(raw->msgtype+strlen(raw->msgtype)," prn=%d",prn);
+    }
+    eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
+    eph.sva=uraindex(ura<=0?6144.0:sqrt(ura));
+    eph.fit=fit?4.0:2.0;
+    eph.code=2;
+    eph.flag=1;
+    eph.toe=gpst2time(eph.week,eph.toes);
+    eph.toc=gpst2time(eph.week,toc);
+    eph.ttr=raw->time;
+    
+    if (!strstr(raw->opt,"-EPHALL")) {
+        if (timediff(raw->nav.eph[sat-1].toe,eph.toe)==0.0&&
+            raw->nav.eph[sat-1].iode==eph.iode) return 0; /* unchanged */
+    }
+    raw->nav.eph[sat-1]=eph;
+    raw->ephsat=sat;
+    raw->ephset=0;
+    return 2;
 }
 /* decode QZSSIONUTCB --------------------------------------------------------*/
 static int decode_qzssionutcb(raw_t *raw)
@@ -830,6 +1013,7 @@ static int decode_galephemerisb(raw_t *raw)
     if (!(sel_eph&2)&&set==1) return 0;
     
     eph.sat =sat;
+    eph.type=set; /* ephemeris type = I/NAV or F/NAV */
     eph.A   =SQR(sqrtA);
     eph.f0  =set?af0_fnav:af0_inav;
     eph.f1  =set?af1_fnav:af1_inav;
@@ -859,6 +1043,87 @@ static int decode_galephemerisb(raw_t *raw)
     raw->nav.eph[sat-1+MAXSAT*set]=eph;
     raw->ephsat=sat;
     raw->ephset=set;
+    return 2;
+}
+/* decode GALINAVEPHEMERISB ------------------------------------------------------*/
+static int decode_galinavephemerisb(raw_t *raw)
+{
+    eph_t eph={0};
+    uint8_t *p=raw->buff+OEM4HLEN;
+    double tow,sqrtA,tt;
+    int prn,sat,week,svh_e1b,svh_e5b,dvs_e1b,src_inav;
+    int dvs_e5b,toc_inav; 
+    
+    if (raw->len<OEM4HLEN+184) {
+        trace(2,"oem4 galinavephemrisb length error: len=%d\n",raw->len);
+        return -1;
+    }
+    prn       =U4(p);   p+=4;
+    svh_e5b   =U1(p)&3; p+=1;
+    dvs_e5b   =U1(p)&1; p+=1+1+1;
+    svh_e1b   =U1(p)&3; p+=1;
+    dvs_e1b   =U1(p)&1; p+=1+1+1;
+    eph.iode  =U2(p);   p+=2;   /* IODNav */
+    eph.sva   =U1(p);   p+=1;   /* SISA index */
+    src_inav  =U1(p);   p+=1;   /* INAV Source */
+    eph.toes  =U4(p);   p+=4;
+    toc_inav  =U4(p);   p+=4;
+    eph.M0    =R8(p);   p+=8;
+    eph.deln  =R8(p);   p+=8;
+    eph.e     =R8(p);   p+=8;
+    sqrtA     =R8(p);   p+=8;
+    eph.i0    =R8(p);   p+=8;
+    eph.idot  =R8(p);   p+=8;
+    eph.OMG0  =R8(p);   p+=8;
+    eph.omg   =R8(p);   p+=8;
+    eph.OMGd  =R8(p);   p+=8;
+    eph.cuc   =R8(p);   p+=8;
+    eph.cus   =R8(p);   p+=8;
+    eph.crc   =R8(p);   p+=8;
+    eph.crs   =R8(p);   p+=8;
+    eph.cic   =R8(p);   p+=8;
+    eph.cis   =R8(p);   p+=8;
+    eph.f0    =R8(p);   p+=8;
+    eph.f1    =R8(p);   p+=8;
+    eph.f2    =R8(p);   p+=8;
+    eph.tgd[0]=R8(p);   p+=8; /* BGD: E5A-E1 (s) */
+    eph.tgd[1]=R8(p);         /* BGD: E5B-E1 (s) */
+    
+    if (!(sat=satno(SYS_GAL,prn))) {
+        trace(2,"oemv galephemeris satellite error: prn=%d\n",prn);
+        return -1;
+    }
+    if (raw->outtype) {
+        sprintf(raw->msgtype+strlen(raw->msgtype)," prn=%d",prn);
+    }
+
+    eph.sat =sat;
+    eph.type=0; /* ephemeris type = I/NAV */
+    eph.A   =SQR(sqrtA);
+    eph.svh =((svh_e5b<<4)|(dvs_e5b<<3)|(svh_e1b<<1)|dvs_e1b);/* bit0:E1-B DVS bit1-2:E1-B SVH bit3:E5b DVS bit4-5:E5b SVH*/
+    eph.code=((src_inav&1<<0)+(src_inav&2<<2)+(1<<9)); /* Data sources */
+    eph.iodc=eph.iode;
+    tow=time2gpst(raw->time,&week);
+    eph.week=week; /* gps-week = gal-week */
+    eph.toe=gpst2time(eph.week,eph.toes);
+    
+    tt=timediff(eph.toe,raw->time);
+    if      (tt<-302400.0) eph.week++;
+    else if (tt> 302400.0) eph.week--;
+    eph.toe=gpst2time(eph.week,eph.toes);
+    eph.toc=adjweek(raw->time,toc_inav);
+    eph.ttr=raw->time;
+    
+    if (!strstr(raw->opt,"-EPHALL")) {
+        if (eph.iode==raw->nav.eph[sat-1+MAXSAT].iode&&
+            timediff(eph.toe,raw->nav.eph[sat-1+MAXSAT].toe)==0.0&&
+            timediff(eph.toc,raw->nav.eph[sat-1+MAXSAT].toc)==0.0) {
+            return 0; /* unchanged */
+        }
+    }
+    raw->nav.eph[sat-1]=eph;
+    raw->ephsat=sat;
+    raw->ephset=0;
     return 2;
 }
 /* decode GALCLOCKB ----------------------------------------------------------*/
@@ -966,6 +1231,7 @@ static int decode_bdsephemerisb(raw_t *raw)
         sprintf(raw->msgtype+strlen(raw->msgtype)," prn=%d",prn);
     }
     eph.sat=sat;
+    eph.type=(prn>=6&&prn<=58)?0:1; /* ephemeris type = D1 or D2 */
     eph.A  =SQR(sqrtA);
     eph.sva=uraindex(ura);
     eph.toe=bdt2gpst(bdt2time(eph.week,eph.toes)); /* bdt -> gpst */
@@ -1038,6 +1304,7 @@ static int decode_navicephemerisb(raw_t *raw)
         sprintf(raw->msgtype+strlen(raw->msgtype)," prn=%d",prn);
     }
     eph.sat =sat;
+    eph.type=0; /* ephemeris type = LNAV */
     eph.A   =SQR(sqrtA);
     eph.svh =(l5_health<<1)|s_health;
     eph.iodc=eph.iode;
@@ -1296,21 +1563,24 @@ static int decode_oem4(raw_t *raw)
         sprintf(raw->msgtype,"OEM4 %4d (%4d): %s",type,raw->len,tstr);
     }
     switch (type) {
-        case ID_RANGECMP       : return decode_rangecmpb       (raw);
-        case ID_RANGE          : return decode_rangeb          (raw);
-        case ID_RAWEPHEM       : return decode_rawephemb       (raw);
-        case ID_IONUTC         : return decode_ionutcb         (raw);
-        case ID_RAWWAASFRAME   : return decode_rawwaasframeb   (raw);
-        case ID_RAWSBASFRAME   : return decode_rawsbasframeb   (raw);
-        case ID_GLOEPHEMERIS   : return decode_gloephemerisb   (raw);
-        case ID_GALEPHEMERIS   : return decode_galephemerisb   (raw);
-        case ID_GALIONO        : return decode_galionob        (raw);
-        case ID_GALCLOCK       : return decode_galclockb       (raw);
-        case ID_QZSSRAWEPHEM   : return decode_qzssrawephemb   (raw);
-        case ID_QZSSRAWSUBFRAME: return decode_qzssrawsubframeb(raw);
-        case ID_QZSSIONUTC     : return decode_qzssionutcb     (raw);
-        case ID_BDSEPHEMERIS   : return decode_bdsephemerisb   (raw);
-        case ID_NAVICEPHEMERIS : return decode_navicephemerisb (raw);
+        case ID_RANGECMP         : return decode_rangecmpb        (raw);
+        case ID_RANGE            : return decode_rangeb           (raw);
+        case ID_RAWEPHEM         : return decode_rawephemb        (raw);
+        case ID_IONUTC           : return decode_ionutcb          (raw);
+        case ID_RAWWAASFRAME     : return decode_rawwaasframeb    (raw);
+        case ID_RAWSBASFRAME     : return decode_rawsbasframeb    (raw);
+        case ID_GPSEPHEM         : return decode_gpsephemb        (raw);
+        case ID_GLOEPHEMERIS     : return decode_gloephemerisb    (raw);
+        case ID_GALEPHEMERIS     : return decode_galephemerisb    (raw);
+        case ID_GALINAVEPHEMERIS : return decode_galinavephemerisb(raw);
+        case ID_GALIONO          : return decode_galionob         (raw);
+        case ID_GALCLOCK         : return decode_galclockb        (raw);
+        case ID_QZSSRAWEPHEM     : return decode_qzssrawephemb    (raw);
+        case ID_QZSSRAWSUBFRAME  : return decode_qzssrawsubframeb (raw);
+        case ID_QZSSEPHEMERIS    : return decode_qzssephemerisb   (raw);
+        case ID_QZSSIONUTC       : return decode_qzssionutcb      (raw);
+        case ID_BDSEPHEMERIS     : return decode_bdsephemerisb    (raw);
+        case ID_NAVICEPHEMERIS   : return decode_navicephemerisb  (raw);
     }
     return 0;
 }

@@ -1,7 +1,10 @@
 /*------------------------------------------------------------------------------
 * rtksvr.c : rtk server functions
 *
-*          Copyright (C) 2007-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2021 by T.TAKASU, All rights reserved.
+*
+* references :
+*     [1]  CAO IS-QZSS-MDC-002, November, 2023
 *
 * options : -DWIN32    use WIN32 API
 *
@@ -42,6 +45,11 @@
 *                            handle multiple ephemeris sets in updatesvr()
 *                            use API sat2freq() to get carrier frequency
 *                            use integer types in stdint.h
+*           2021/01/11  1.23 lock(),unlock(),initlock()->
+*                              rtk_lock(),rtk_unlock(),rtk_initlock()
+*           2021/05/21  1.24 fix typos in comments
+*           2024/02/01  1.25 branch from ver.2.4.3b35 for MALIB
+*                            fix bug update_ssr(),rtksrvinit()
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -253,7 +261,7 @@ static void update_antpos(rtksvr_t *svr, int index)
         /* antenna delta */
         ecef2pos(svr->rtk.rb,pos);
         if (sta->deltype) { /* xyz */
-            del[2]=sta->hgt;
+            del[2]=-sta->hgt; /* marker = ARP - ant-height */
             enu2ecef(pos,del,dr);
             for (i=0;i<3;i++) {
                 svr->rtk.rb[i]+=sta->del[i]+dr[i];
@@ -272,6 +280,7 @@ static void update_antpos(rtksvr_t *svr, int index)
 static void update_ssr(rtksvr_t *svr, int index)
 {
     int i,sys,prn,iode;
+    int ephset = 0; /* augmentation target is Galileo I/NAV ref [1] */
 
     for (i=0;i<MAXSAT;i++) {
         if (!svr->rtcm[index].ssr[i].update) continue;
@@ -287,8 +296,8 @@ static void update_ssr(rtksvr_t *svr, int index)
         
         /* check corresponding ephemeris exists */
         if (sys==SYS_GPS||sys==SYS_GAL||sys==SYS_QZS) {
-            if (svr->nav.eph[i       ].iode!=iode&&
-                svr->nav.eph[i+MAXSAT].iode!=iode) {
+            if (svr->nav.eph[i+MAXSAT*ephset].iode!=iode&&
+                svr->nav.eph[i+MAXSAT*(2+ephset)].iode!=iode) {
                 continue;
             }
         }
@@ -322,7 +331,7 @@ static void update_svr(rtksvr_t *svr, int ret, obs_t *obs, nav_t *nav,
     else if (ret==9) { /* ion/utc parameters */
         update_ionutc(svr,nav,index);
     }
-    else if (ret==5) { /* antenna postion */
+    else if (ret==5) { /* antenna position */
         update_antpos(svr,index);
     }
     else if (ret==7) { /* dgps correction */
@@ -338,15 +347,21 @@ static void update_svr(rtksvr_t *svr, int ret, obs_t *obs, nav_t *nav,
 /* decode receiver raw/rtcm data ---------------------------------------------*/
 static int decoderaw(rtksvr_t *svr, int index)
 {
-    obs_t *obs;
-    nav_t *nav;
+    obs_t *obs={0};
+    nav_t *nav={0};
     sbsmsg_t *sbsmsg=NULL;
-    int i,ret,ephsat,ephset,fobs=0;
+    int i,ret,ephsat=0,ephset=0,fobs=0;
+    static int init_flg=1;
     
     tracet(4,"decoderaw: index=%d\n",index);
     
     rtksvrlock(svr);
     
+    if(init_flg&&svr->rtcm[0].time.time!=0){
+        init_mcssr(svr->rtcm[0].time);
+        init_flg=0;
+    }
+
     for (i=0;i<svr->nb[index];i++) {
         
         /* input rtcm/receiver raw data from stream */
@@ -364,8 +379,11 @@ static int decoderaw(rtksvr_t *svr, int index)
             ephsat=svr->rtcm[index].ephsat;
             ephset=svr->rtcm[index].ephset;
         }
+        else if (svr->format[index]==STRFMT_L6E) {
+            ret=input_qzssl6e(svr->rtcm+index,svr->buff[index][i]);
+        }
         else {
-            ret=input_raw(svr->raw+index,svr->format[index],svr->buff[index][i]);
+            ret=input_raw(svr->raw+index,svr->rtcm+index,svr->format[index],svr->buff[index][i]);
             obs=&svr->raw[index].obs;
             nav=&svr->raw[index].nav;
             ephsat=svr->raw[index].ephsat;
@@ -453,21 +471,7 @@ static void decodefile(rtksvr_t *svr, int index)
         rtksvrunlock(svr);
     }
 }
-/* carrier-phase bias (fcb) correction ---------------------------------------*/
-static void corr_phase_bias(obsd_t *obs, int n, const nav_t *nav)
-{
-    double freq;
-    uint8_t code;
-    int i,j;
-    
-    for (i=0;i<n;i++) for (j=0;j<NFREQ;j++) {
-        code=obs[i].code[j];
-        if ((freq=sat2freq(obs[i].sat,code,nav))==0.0) continue;
-        
-        /* correct phase bias (cyc) */
-        obs[i].L[j]-=nav->ssr[obs[i].sat-1].pbias[code-1]*freq/CLIGHT;
-    }
-}
+
 /* periodic command ----------------------------------------------------------*/
 static void periodic_cmd(int cycle, const char *cmd, stream_t *stream)
 {
@@ -495,67 +499,67 @@ static void periodic_cmd(int cycle, const char *cmd, stream_t *stream)
 /* baseline length -----------------------------------------------------------*/
 static double baseline_len(const rtk_t *rtk)
 {
-	double dr[3];
-	int i;
-
-	if (norm(rtk->sol.rr,3)<=0.0||norm(rtk->rb,3)<=0.0) return 0.0;
-
-	for (i=0;i<3;i++) {
-		dr[i]=rtk->sol.rr[i]-rtk->rb[i];
-	}
-	return norm(dr,3)*0.001; /* (km) */
+    double dr[3];
+    int i;
+    
+    if (norm(rtk->sol.rr,3)<=0.0||norm(rtk->rb,3)<=0.0) return 0.0;
+    
+    for (i=0;i<3;i++) {
+        dr[i]=rtk->sol.rr[i]-rtk->rb[i];
+    }
+    return norm(dr,3)*0.001; /* (km) */
 }
 /* send nmea request to base/nrtk input stream -------------------------------*/
 static void send_nmea(rtksvr_t *svr, uint32_t *tickreset)
 {
-	sol_t sol_nmea={{0}};
-	double vel,bl;
-	uint32_t tick=tickget();
-	int i;
-
-	if (svr->stream[1].state!=1) return;
-
-	if (svr->nmeareq==1) { /* lat-lon-hgt mode */
-		sol_nmea.stat=SOLQ_SINGLE;
-		sol_nmea.time=utc2gpst(timeget());
-		matcpy(sol_nmea.rr,svr->nmeapos,3,1);
-		strsendnmea(svr->stream+1,&sol_nmea);
-	}
-	else if (svr->nmeareq==2) { /* single-solution mode */
-		if (norm(svr->rtk.sol.rr,3)<=0.0) return;
-		sol_nmea.stat=SOLQ_SINGLE;
-		sol_nmea.time=utc2gpst(timeget());
-		matcpy(sol_nmea.rr,svr->rtk.sol.rr,3,1);
-		strsendnmea(svr->stream+1,&sol_nmea);
-	}
-	else if (svr->nmeareq==3) { /* reset-and-single-sol mode */
-
-		/* send reset command if baseline over threshold */
-		bl=baseline_len(&svr->rtk);
-		if (bl>=svr->bl_reset&&(int)(tick-*tickreset)>MIN_INT_RESET) {
-			strsendcmd(svr->stream+1,svr->cmd_reset);
-			
-			tracet(2,"send reset: bl=%.3f rr=%.3f %.3f %.3f rb=%.3f %.3f %.3f\n",
-				   bl,svr->rtk.sol.rr[0],svr->rtk.sol.rr[1],svr->rtk.sol.rr[2],
-				   svr->rtk.rb[0],svr->rtk.rb[1],svr->rtk.rb[2]);
-			*tickreset=tick;
-		}
-		if (norm(svr->rtk.sol.rr,3)<=0.0) return;
-		sol_nmea.stat=SOLQ_SINGLE;
-		sol_nmea.time=utc2gpst(timeget());
-		matcpy(sol_nmea.rr,svr->rtk.sol.rr,3,1);
-
-		/* set predicted position if velocity > 36km/h */
-		if ((vel=norm(svr->rtk.sol.rr+3,3))>10.0) {
-			for (i=0;i<3;i++) {
-				sol_nmea.rr[i]+=svr->rtk.sol.rr[i+3]/vel*svr->bl_reset*0.8;
-			}
-		}
-		strsendnmea(svr->stream+1,&sol_nmea);
-
-		tracet(3,"send nmea: rr=%.3f %.3f %.3f\n",sol_nmea.rr[0],sol_nmea.rr[1],
-			   sol_nmea.rr[2]);
-	}
+    sol_t sol_nmea={{0}};
+    double vel,bl;
+    uint32_t tick=tickget();
+    int i;
+    
+    if (svr->stream[1].state!=1) return;
+    
+    if (svr->nmeareq==1) { /* lat-lon-hgt mode */
+        sol_nmea.stat=SOLQ_SINGLE;
+        sol_nmea.time=utc2gpst(timeget());
+        matcpy(sol_nmea.rr,svr->nmeapos,3,1);
+        strsendnmea(svr->stream+1,&sol_nmea);
+    }
+    else if (svr->nmeareq==2) { /* single-solution mode */
+        if (norm(svr->rtk.sol.rr,3)<=0.0) return;
+        sol_nmea.stat=SOLQ_SINGLE;
+        sol_nmea.time=utc2gpst(timeget());
+        matcpy(sol_nmea.rr,svr->rtk.sol.rr,3,1);
+        strsendnmea(svr->stream+1,&sol_nmea);
+    }
+    else if (svr->nmeareq==3) { /* reset-and-single-sol mode */
+        
+        /* send reset command if baseline over threshold */
+        bl=baseline_len(&svr->rtk);
+        if (bl>=svr->bl_reset&&(int)(tick-*tickreset)>MIN_INT_RESET) {
+            strsendcmd(svr->stream+1,svr->cmd_reset);
+            
+            tracet(2,"send reset: bl=%.3f rr=%.3f %.3f %.3f rb=%.3f %.3f %.3f\n",
+                   bl,svr->rtk.sol.rr[0],svr->rtk.sol.rr[1],svr->rtk.sol.rr[2],
+                   svr->rtk.rb[0],svr->rtk.rb[1],svr->rtk.rb[2]);
+            *tickreset=tick;
+        }
+        if (norm(svr->rtk.sol.rr,3)<=0.0) return;
+        sol_nmea.stat=SOLQ_SINGLE;
+        sol_nmea.time=utc2gpst(timeget());
+        matcpy(sol_nmea.rr,svr->rtk.sol.rr,3,1);
+        
+        /* set predicted position if velocity > 36km/h */
+        if ((vel=norm(svr->rtk.sol.rr+3,3))>10.0) {
+            for (i=0;i<3;i++) {
+                sol_nmea.rr[i]+=svr->rtk.sol.rr[i+3]/vel*svr->bl_reset*0.8;
+            }
+        }
+        strsendnmea(svr->stream+1,&sol_nmea);
+        
+        tracet(3,"send nmea: rr=%.3f %.3f %.3f\n",sol_nmea.rr[0],sol_nmea.rr[1],
+               sol_nmea.rr[2]);
+    }
 }
 /* rtk server thread ---------------------------------------------------------*/
 #ifdef WIN32
@@ -631,10 +635,6 @@ static void *rtksvrthread(void *arg)
             for (j=0;j<svr->obs[1][0].n&&obs.n<MAXOBS*2;j++) {
                 obs.data[obs.n++]=svr->obs[1][0].data[j];
             }
-            /* carrier phase bias correction */
-            if (!strstr(svr->rtk.opt.pppopt,"-DIS_FCB")) {
-                corr_phase_bias(obs.data,obs.n,&svr->nav);
-            }
             /* rtk positioning */
             rtksvrlock(svr);
             rtkpos(&svr->rtk,obs.data,obs.n,&svr->nav);
@@ -699,6 +699,8 @@ extern int rtksvrinit(rtksvr_t *svr)
     eph_t  eph0 ={0,-1,-1};
     geph_t geph0={0,-1};
     seph_t seph0={0};
+    stec_t stec0={{0}};
+    trop_t trop0={{0}};
     int i,j;
     
     tracet(3,"rtksvrinit:\n");
@@ -736,10 +738,23 @@ extern int rtksvrinit(rtksvr_t *svr)
     for (i=0;i<MAXSAT*4 ;i++) svr->nav.eph [i]=eph0;
     for (i=0;i<NSATGLO*2;i++) svr->nav.geph[i]=geph0;
     for (i=0;i<NSATSBS*2;i++) svr->nav.seph[i]=seph0;
-    svr->nav.n =MAXSAT *2;
+    svr->nav.n =MAXSAT *4;
     svr->nav.ng=NSATGLO*2;
     svr->nav.ns=NSATSBS*2;
     
+    svr->nav.pppcorr.nsta=0;
+    for (i=0;i<MAXSTA;i++) {
+        if (!(svr->nav.pppcorr.stec[i]=(stec_t *)malloc(sizeof(stec_t)*MAXOBS*2))||
+            !(svr->nav.pppcorr.trop[i]=(trop_t *)malloc(sizeof(trop_t)*2))) {
+            tracet(1,"rtksvrinit: malloc error(pppcorr)\n");
+            return 0;
+        }
+        for (j=0;j<MAXOBS*2;j++) svr->nav.pppcorr.stec[i][j]=stec0;
+        for (j=0;j<2;j++)        svr->nav.pppcorr.trop[i][j]=trop0;
+        svr->nav.pppcorr.ns[i]=0;
+        svr->nav.pppcorr.nt[i]=0;
+    }
+
     for (i=0;i<3;i++) for (j=0;j<MAXOBSBUF;j++) {
         if (!(svr->obs[i][j].data=(obsd_t *)malloc(sizeof(obsd_t)*MAXOBS))) {
             tracet(1,"rtksvrinit: malloc error\n");
@@ -755,7 +770,7 @@ extern int rtksvrinit(rtksvr_t *svr)
     for (i=0;i<3;i++) *svr->cmds_periodic[i]='\0';
     *svr->cmd_reset='\0';
     svr->bl_reset=10.0;
-    initlock(&svr->lock);
+    rtk_initlock(&svr->lock);
     
     return 1;
 }
@@ -781,8 +796,8 @@ extern void rtksvrfree(rtksvr_t *svr)
 * args   : rtksvr_t *svr    IO rtk server
 * return : status (1:ok 0:error)
 *-----------------------------------------------------------------------------*/
-extern void rtksvrlock  (rtksvr_t *svr) {lock  (&svr->lock);}
-extern void rtksvrunlock(rtksvr_t *svr) {unlock(&svr->lock);}
+extern void rtksvrlock  (rtksvr_t *svr) {rtk_lock  (&svr->lock);}
+extern void rtksvrunlock(rtksvr_t *svr) {rtk_unlock(&svr->lock);}
 
 /* start rtk server ------------------------------------------------------------
 * start rtk server thread
@@ -826,6 +841,7 @@ extern void rtksvrunlock(rtksvr_t *svr) {unlock(&svr->lock);}
 *                              solopt[0]=solution 1 options
 *                              solopt[1]=solution 2 options
 *          stream_t *moni   I  monitor stream (NULL: not used)
+*          gtime_t rst      I  raw/rtcm data start time
 *          char   *errmsg   O  error message
 * return : status (1:ok 0:error)
 *-----------------------------------------------------------------------------*/
@@ -833,7 +849,7 @@ extern int rtksvrstart(rtksvr_t *svr, int cycle, int buffsize, int *strs,
                        char **paths, int *formats, int navsel, char **cmds,
                        char **cmds_periodic, char **rcvopts, int nmeacycle,
                        int nmeareq, const double *nmeapos, prcopt_t *prcopt,
-                       solopt_t *solopt, stream_t *moni, char *errmsg)
+                       solopt_t *solopt, stream_t *moni, gtime_t rst, char *errmsg)
 {
     gtime_t time,time0={0};
     int i,j,rw;
@@ -922,7 +938,12 @@ extern int rtksvrstart(rtksvr_t *svr, int cycle, int buffsize, int *strs,
         }
         /* set initial time for rtcm and raw */
         if (i<3) {
-            time=utc2gpst(timeget());
+            if(rst.time != 0){
+                time=rst;
+            }
+            else{
+                time=utc2gpst(timeget());
+            }
             svr->raw [i].time=strs[i]==STR_FILE?strgettime(svr->stream+i):time;
             svr->rtcm[i].time=strs[i]==STR_FILE?strgettime(svr->stream+i):time;
         }

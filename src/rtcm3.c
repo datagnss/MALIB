@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * rtcm3.c : RTCM ver.3 message decorder functions
 *
-*          Copyright (C) 2009-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2009-2021 by T.TAKASU, All rights reserved.
 *
 * references :
 *     see rtcm.c
@@ -47,6 +47,9 @@
 *                           use API code2idx() to get freq-index
 *                           use API code2freq() to get carrier frequency
 *                           use integer types in stdint.h
+*           2021/01/04 1.23 support GLO extended SVH, SVA and flags in MT1020
+*           2024/02/01 1.24 branch from ver.2.4.3b35 for MALIB
+*                           support MT4050 QZSS LEX signal raw data(MSJ)(ref [19])
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -111,10 +114,10 @@ const char *msm_sig_sbs[32]={
     ""  ,""  ,""  ,""  ,""  ,""  ,""  ,""
 };
 const char *msm_sig_cmp[32]={
-    /* BeiDou: ref [17] table 3.5-108 */
+    /* BeiDou: ref [17] table 3.5-108, Tentative IDs for B1C and B2a */
     ""  ,"2I","2Q","2X",""  ,""  ,""  ,"6I","6Q","6X",""  ,""  ,
-    ""  ,"7I","7Q","7X",""  ,""  ,""  ,""  ,""  ,""  ,""  ,""  ,
-    ""  ,""  ,""  ,""  ,""  ,""  ,""  ,""
+    ""  ,"7I","7Q","7X",""  ,""  ,""  ,""  ,""  ,"5D","5P","5X",
+    ""  ,""  ,""  ,""  ,""  ,"1D","1P","1X"
 };
 const char *msm_sig_irn[32]={
     /* NavIC/IRNSS: ref [17] table 3.5-108.3 */
@@ -125,14 +128,15 @@ const char *msm_sig_irn[32]={
 /* SSR signal and tracking mode IDs ------------------------------------------*/
 const uint8_t ssr_sig_gps[32]={
     CODE_L1C,CODE_L1P,CODE_L1W,CODE_L1S,CODE_L1L,CODE_L2C,CODE_L2D,CODE_L2S,
-    CODE_L2L,CODE_L2X,CODE_L2P,CODE_L2W,       0,       0,CODE_L5I,CODE_L5Q
+    CODE_L2L,CODE_L2X,CODE_L2P,CODE_L2W,       0,       0,CODE_L5I,CODE_L5Q,
+    CODE_L5X,CODE_L1X
 };
 const uint8_t ssr_sig_glo[32]={
     CODE_L1C,CODE_L1P,CODE_L2C,CODE_L2P,CODE_L4A,CODE_L4B,CODE_L6A,CODE_L6B,
     CODE_L3I,CODE_L3Q
 };
 const uint8_t ssr_sig_gal[32]={
-    CODE_L1A,CODE_L1B,CODE_L1C,       0,       0,CODE_L5I,CODE_L5Q,       0,
+    CODE_L1A,CODE_L1B,CODE_L1C,CODE_L1X,       0,CODE_L5I,CODE_L5Q,CODE_L5X,
     CODE_L7I,CODE_L7Q,       0,CODE_L8I,CODE_L8Q,       0,CODE_L6A,CODE_L6B,
     CODE_L6C
 };
@@ -788,6 +792,7 @@ static int decode_type1019(rtcm_t *rtcm)
         return -1;
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
     eph.week=adjgpsweek(week);
     if (rtcm->time.time==0) rtcm->time=utc2gpst(timeget());
     tt=timediff(gpst2time(eph.week,eph.toes),rtcm->time);
@@ -811,15 +816,19 @@ static int decode_type1020(rtcm_t *rtcm)
     geph_t geph={0};
     double tk_h,tk_m,tk_s,toe,tow,tod,tof;
     char *msg;
-    int i=24+12,prn,sat,week,tb,bn,sys=SYS_GLO;
+    int i=24+12,prn,sat,week,tb,Bn,Cn,Cn_a,P1,P2,P3,P4,P,M,ln,sys=SYS_GLO;
     
     if (i+348<=rtcm->len*8) {
         prn        =getbitu(rtcm->buff,i, 6);           i+= 6;
-        geph.frq   =getbitu(rtcm->buff,i, 5)-7;         i+= 5+2+2;
+        geph.frq   =getbitu(rtcm->buff,i, 5)-7;         i+= 5;
+        Cn         =getbitu(rtcm->buff,i, 1);           i+= 1;
+        Cn_a       =getbitu(rtcm->buff,i, 1);           i+= 1;
+        P1         =getbitu(rtcm->buff,i, 2);           i+= 2;
         tk_h       =getbitu(rtcm->buff,i, 5);           i+= 5;
         tk_m       =getbitu(rtcm->buff,i, 6);           i+= 6;
         tk_s       =getbitu(rtcm->buff,i, 1)*30.0;      i+= 1;
-        bn         =getbitu(rtcm->buff,i, 1);           i+= 1+1;
+        Bn         =getbitu(rtcm->buff,i, 1);           i+= 1;
+        P2         =getbitu(rtcm->buff,i, 1);           i+= 1;
         tb         =getbitu(rtcm->buff,i, 7);           i+= 7;
         geph.vel[0]=getbitg(rtcm->buff,i,24)*P2_20*1E3; i+=24;
         geph.pos[0]=getbitg(rtcm->buff,i,27)*P2_11*1E3; i+=27;
@@ -829,11 +838,17 @@ static int decode_type1020(rtcm_t *rtcm)
         geph.acc[1]=getbitg(rtcm->buff,i, 5)*P2_30*1E3; i+= 5;
         geph.vel[2]=getbitg(rtcm->buff,i,24)*P2_20*1E3; i+=24;
         geph.pos[2]=getbitg(rtcm->buff,i,27)*P2_11*1E3; i+=27;
-        geph.acc[2]=getbitg(rtcm->buff,i, 5)*P2_30*1E3; i+= 5+1;
-        geph.gamn  =getbitg(rtcm->buff,i,11)*P2_40;     i+=11+3;
+        geph.acc[2]=getbitg(rtcm->buff,i, 5)*P2_30*1E3; i+= 5;
+        P3         =getbitu(rtcm->buff,i, 1);           i+= 1;
+        geph.gamn  =getbitg(rtcm->buff,i,11)*P2_40;     i+=11;
+        P          =getbitu(rtcm->buff,i, 2);           i+= 2;
+        ln         =getbitu(rtcm->buff,i, 1);           i+= 1;
         geph.taun  =getbitg(rtcm->buff,i,22)*P2_30;     i+=22;
-        geph.dtaun =getbitg(rtcm->buff,i, 5)*P2_30;     i+=5;
-        geph.age   =getbitu(rtcm->buff,i, 5);
+        geph.dtaun =getbitg(rtcm->buff,i, 5)*P2_30;     i+= 5;
+        geph.age   =getbitu(rtcm->buff,i, 5);           i+= 5;
+        P4         =getbitu(rtcm->buff,i, 1);           i+= 1;
+        geph.sva   =getbitu(rtcm->buff,i, 4);           i+= 4+11;
+        M          =getbitu(rtcm->buff,i, 2);
     }
     else {
         trace(2,"rtcm3 1020 length error: len=%d\n",rtcm->len);
@@ -847,11 +862,12 @@ static int decode_type1020(rtcm_t *rtcm)
     
     if (rtcm->outtype) {
         msg=rtcm->msgtype+strlen(rtcm->msgtype);
-        sprintf(msg," prn=%2d tk=%02.0f:%02.0f:%02.0f frq=%2d bn=%d tb=%d",
-                prn,tk_h,tk_m,tk_s,geph.frq,bn,tb);
+        sprintf(msg," prn=%2d tk=%02.0f:%02.0f:%02.0f frq=%2d Bn=%d tb=%d",
+                prn,tk_h,tk_m,tk_s,geph.frq,Bn,tb);
     }
     geph.sat=sat;
-    geph.svh=bn;
+    geph.svh=(ln<<3)+(Cn_a<<2)+(Cn<<1)+Bn;
+    geph.flags=(M<<7)+(P4<<6)+(P3<<5)+(P2<<4)+(P1<<2)+P;
     geph.iode=tb&0x7F;
     if (rtcm->time.time==0) rtcm->time=utc2gpst(timeget());
     tow=time2gpst(gpst2utc(rtcm->time),&week);
@@ -1105,6 +1121,7 @@ static int decode_type1041(rtcm_t *rtcm)
         return -1;
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
     eph.week=adjgpsweek(week);
     if (rtcm->time.time==0) rtcm->time=utc2gpst(timeget());
     tt=timediff(gpst2time(eph.week,eph.toes),rtcm->time);
@@ -1178,6 +1195,7 @@ static int decode_type1044(rtcm_t *rtcm)
         return -1;
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
     eph.week=adjgpsweek(week);
     if (rtcm->time.time==0) rtcm->time=utc2gpst(timeget());
     tt=timediff(gpst2time(eph.week,eph.toes),rtcm->time);
@@ -1206,7 +1224,7 @@ static int decode_type1045(rtcm_t *rtcm)
     int i=24+12,prn,sat,week,e5a_hs,e5a_dvs,rsv,sys=SYS_GAL;
     
     if (strstr(rtcm->opt,"-GALINAV")) return 0;
-
+    
     if (i+484<=rtcm->len*8) {
         prn       =getbitu(rtcm->buff,i, 6);              i+= 6;
         week      =getbitu(rtcm->buff,i,12);              i+=12; /* gst-week */
@@ -1256,6 +1274,7 @@ static int decode_type1045(rtcm_t *rtcm)
         return 0;
     }
     eph.sat=sat;
+    eph.type=1; /* ephemeris type = F/NAV */
     eph.week=week+1024; /* gal-week = gst-week + 1024 */
     if (rtcm->time.time==0) rtcm->time=utc2gpst(timeget());
     tt=timediff(gpst2time(eph.week,eph.toes),rtcm->time);
@@ -1285,7 +1304,7 @@ static int decode_type1046(rtcm_t *rtcm)
     int i=24+12,prn,sat,week,e5b_hs,e5b_dvs,e1_hs,e1_dvs,sys=SYS_GAL;
     
     if (strstr(rtcm->opt,"-GALFNAV")) return 0;
-
+    
     if (i+492<=rtcm->len*8) {
         prn       =getbitu(rtcm->buff,i, 6);              i+= 6;
         week      =getbitu(rtcm->buff,i,12);              i+=12;
@@ -1337,6 +1356,7 @@ static int decode_type1046(rtcm_t *rtcm)
         return 0;
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = I/NAV */
     eph.week=week+1024; /* gal-week = gst-week + 1024 */
     if (rtcm->time.time==0) rtcm->time=utc2gpst(timeget());
     tt=timediff(gpst2time(eph.week,eph.toes),rtcm->time);
@@ -1411,6 +1431,7 @@ static int decode_type1042(rtcm_t *rtcm)
         return -1;
     }
     eph.sat=sat;
+    eph.type=(prn>=6&&prn<=58)?0:1; /* ephemeris type = D1 or D2 */
     eph.week=adjbdtweek(week);
     if (rtcm->time.time==0) rtcm->time=utc2gpst(timeget());
     tt=timediff(bdt2gpst(bdt2time(eph.week,eph.toes)),rtcm->time);
@@ -2533,6 +2554,40 @@ static int decode_type4076(rtcm_t *rtcm)
     trace(2,"rtcm3 4076: unsupported message subtype=%d\n",subtype);
     return 0;
 }
+
+/* decode type 4050: QZSS LEX signal raw data MAGELLAN SYSTEMS JAPAN, INC. -----------------*/
+static int decode_type4050(rtcm_t *rtcm)
+{
+    
+    int i=24+12,tow,errbits,prn,type,alert;
+    uint8_t tmpbuff[1200]; /* message buffer */
+    
+    if (1776!=rtcm->len*8) {
+        trace(2,"rtcm3 4050: length error len=%d\n",rtcm->len);
+        return -1;
+    }
+    
+    i+=4;   /* Reserved */
+    tow      = getbitu(rtcm->buff,i,20); i+=20;  /* TOW */
+    errbits  = getbitu(rtcm->buff,i,4);  i+=4;   /* Number of correction error bits */
+    prn      = getbitu(rtcm->buff,i,8);  i+=8;   /* PRN */
+    type     = getbits(rtcm->buff,i,8);  i+=8;   /* L6 Message Type ID */
+    alert    = getbits(rtcm->buff,i,1);  i+=1;   /* Alert Flag */
+
+    trace(3,"rtcm3 4050: tow=%d errbits=%d prn=%d type=%d alert=%d\n",tow, errbits,prn,type,alert);
+    
+    memcpy(tmpbuff, rtcm->buff,sizeof(tmpbuff));
+    
+    memset(rtcm->buff, 0x00, sizeof(rtcm->buff));
+    
+    rtcm->buff[0]=0x1A;
+    rtcm->buff[1]=0xCF;
+    rtcm->buff[2]=0xFC;
+    rtcm->buff[3]=0x1D;
+    memcpy(rtcm->buff+4, tmpbuff+8 , sizeof(uint8_t)*217);
+
+    return decode_qzss_l6emsg(rtcm);
+}
 /* decode RTCM ver.3 message -------------------------------------------------*/
 extern int decode_rtcm3(rtcm_t *rtcm)
 {
@@ -2674,12 +2729,17 @@ extern int decode_rtcm3(rtcm_t *rtcm)
         case 1261: ret=decode_ssr4(rtcm,SYS_CMP,0); break; /* draft */
         case 1262: ret=decode_ssr5(rtcm,SYS_CMP,0); break; /* draft */
         case 1263: ret=decode_ssr6(rtcm,SYS_CMP,0); break; /* draft */
+        case 1265: ret=decode_ssr7(rtcm,SYS_GPS,0); break; /* draft */
+        case 1266: ret=decode_ssr7(rtcm,SYS_GLO,0); break; /* draft */
+        case 1267: ret=decode_ssr7(rtcm,SYS_GAL,0); break; /* draft */
+        case 1268: ret=decode_ssr7(rtcm,SYS_QZS,0); break; /* draft */
         case   11: ret=decode_ssr7(rtcm,SYS_GPS,0); break; /* tentative */
         case   12: ret=decode_ssr7(rtcm,SYS_GAL,0); break; /* tentative */
         case   13: ret=decode_ssr7(rtcm,SYS_QZS,0); break; /* tentative */
         case   14: ret=decode_ssr7(rtcm,SYS_CMP,0); break; /* tentative */
         case 4073: ret=decode_type4073(rtcm); break;
         case 4076: ret=decode_type4076(rtcm); break;
+        case 4050: ret=decode_type4050(rtcm); break;
     }
     if (ret>=0) {
         if      (1001<=type&&type<=1299) rtcm->nmsg3[type-1000]++; /*   1-299 */

@@ -4,18 +4,18 @@
 *          Copyright (C) 2007-2020 by T.TAKASU, All rights reserved.
 *
 * reference :
-*     [1] Hemisphere GPS, Grescent Integrator's Manual, December, 2005
+*     [1] Hemisphere GPS, Crescent Integrator's Manual, December, 2005
 *     [2] Hemisphere GPS, GPS Technical Reference, Part No. 875-0175-000,
 *         Rev.D1, 2008
 *     [3] Hemisphere GPS, Hemisphere GPS Technical Reference Manual, v4.0,
 *         June 30, 2020
 *
-* version : $Revision: 1.2 $ $Date: 2008/07/14 00:05:05 $
+* version : $Revision:$ $Date:$
 * history : 2008/05/21 1.0  new
 *           2009/04/01 1.1  support sbas, set 0 to L2 observables
 *                           fix bug on getting doppler observables
 *           2009/10/19 1.2  support eclipse (message bin 76)
-*           2009/10/24 1.3  ignore vaild phase flag
+*           2009/10/24 1.3  ignore valid phase flag
 *           2011/05/27 1.4  add -EPHALL option
 *                           fix problem with ARM compiler
 *           2011/07/01 1.5  suppress warning
@@ -26,7 +26,8 @@
 *           2017/04/11 1.9  (char *) -> (signed char *)
 *           2020/11/30 1.10 use integer type in stdint.h
 *                           use sat2freq() instead of lam_carr()
-*                           udpate reference [3]
+*                           update reference [3]
+*           2021/05/21 1.11 fix typos in comments
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -66,7 +67,7 @@ static int chksum(const uint8_t *buff, int len)
     return (sum>>8)==buff[len-3]&&(sum&0xFF)==buff[len-4]&&
            buff[len-2]==0x0D&&buff[len-1]==0x0A;
 }
-/* decode bin 1 postion/velocity ---------------------------------------------*/
+/* decode bin 1 position/velocity --------------------------------------------*/
 static int decode_crespos(raw_t *raw)
 {
     int ns,week,mode;

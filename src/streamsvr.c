@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * streamsvr.c : stream server functions
 *
-*          Copyright (C) 2010-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2010-2021 by T.TAKASU, All rights reserved.
 *
 * options : -DWIN32    use WIN32 API
 *
@@ -31,6 +31,8 @@
 *                           support multiple ephemeris sets (e.g. I/NAV-F/NAV)
 *                           delete API strsvrsetsrctbl()
 *                           use integer types in stdint.h
+*           2021/01/11 1.16 lock(),unlock(),initlock()->
+*                             rtk_lock(),rtk_unlock(),rtk_initlock()
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -510,11 +512,11 @@ static void *strsvrthread(void *arg)
             /* write data to log stream */
             strwrite(svr->strlog,svr->buff,n);
             
-            lock(&svr->lock);
+            rtk_lock(&svr->lock);
             for (i=0;i<n&&svr->npb<svr->buffsize;i++) {
                 svr->pbuf[svr->npb++]=svr->buff[i];
             }
-            unlock(&svr->lock);
+            rtk_unlock(&svr->lock);
         }
         for (i=1;i<svr->nstr;i++) {
             
@@ -578,7 +580,7 @@ extern void strsvrinit(strsvr_t *svr, int nout)
     svr->nstr=i;
     for (i=0;i<16;i++) svr->conv[i]=NULL;
     svr->thread=0;
-    initlock(&svr->lock);
+    rtk_initlock(&svr->lock);
 }
 /* start stream server ---------------------------------------------------------
 * start stream server
@@ -707,7 +709,7 @@ extern int strsvrstart(strsvr_t *svr, int *opts, int *strs, char **paths,
     return 1;
 }
 /* stop stream server ----------------------------------------------------------
-* start stream server
+* stop stream server
 * args   : strsvr_t *svr    IO  stream server struct
 *          char  **cmds     I   stop commands (NULL: no cmd)
 *              cmds[0]= input stream command
@@ -778,7 +780,7 @@ extern int strsvrpeek(strsvr_t *svr, uint8_t *buff, int nmax)
     
     if (!svr->state) return 0;
     
-    lock(&svr->lock);
+    rtk_lock(&svr->lock);
     n=svr->npb<nmax?svr->npb:nmax;
     if (n>0) {
         memcpy(buff,svr->pbuf,n);
@@ -787,7 +789,7 @@ extern int strsvrpeek(strsvr_t *svr, uint8_t *buff, int nmax)
         memmove(svr->pbuf,svr->pbuf+n,svr->npb-n);
     }
     svr->npb-=n;
-    unlock(&svr->lock);
+    rtk_unlock(&svr->lock);
     return n;
 }
 

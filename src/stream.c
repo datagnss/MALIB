@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * stream.c : stream input/output functions
 *
-*          Copyright (C) 2008-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2008-2021 by T.TAKASU, All rights reserved.
 *
 * options : -DWIN32    use WIN32 API
 *           -DSVR_REUSEADDR reuse tcp server address
@@ -74,6 +74,10 @@
 *                           accept HTTP/1.1 as protocol for NTRIP caster
 *                           suppress warning for buffer overflow by sprintf()
 *                           use integer types in stdint.h
+*           2021/01/11 1.30 lock_t,lock(),unlock(),initlock()->
+*                             rtk_lock_t,rtk_lock(),rtk_unlock(),rtk_initlock()
+*           2021/02/19 1.31 support NTRIP 2.0 by NTRIP caster
+*           2021/05/21 1.32 fix typos
 *-----------------------------------------------------------------------------*/
 #include <ctype.h>
 #include "rtklib.h"
@@ -104,7 +108,7 @@
 #define MAXSTATMSG          32          /* max length of status message */
 #define DEFAULT_MEMBUF_SIZE 4096        /* default memory buffer size (bytes) */
 
-#define NTRIP_AGENT         "RTKLIB/" VER_RTKLIB
+#define NTRIP_AGENT         "MALIB/" VER_MALIB
 #define NTRIP_CLI_PORT      2101        /* default ntrip-client connection port */
 #define NTRIP_SVR_PORT      80          /* default ntrip-server connection port */
 #define NTRIP_MAXRSP        32768       /* max size of ntrip response */
@@ -116,7 +120,7 @@
 #define NTRIP_RSP_HTTP      "HTTP/"     /* ntrip response: http */
 #define NTRIP_RSP_ERROR     "ERROR"     /* ntrip response: error */
 #define NTRIP_RSP_UNAUTH    "HTTP/1.0 401 Unauthorized\r\n"
-#define NTRIP_RSP_ERR_PWD   "ERROR - Bad Pasword\r\n"
+#define NTRIP_RSP_ERR_PWD   "ERROR - Bad Password\r\n"
 #define NTRIP_RSP_ERR_MNTP  "ERROR - Bad Mountpoint\r\n"
 
 #define FTP_CMD             "wget"      /* ftp/http command */
@@ -159,7 +163,7 @@ typedef struct {            /* file control type */
     double start;           /* start offset (s) */
     double speed;           /* replay speed (time factor) */
     double swapintv;        /* swap interval (hr) (0: no swap) */
-    lock_t lock;            /* lock flag */
+    rtk_lock_t lock;        /* lock flag */
 } file_t;
 
 typedef struct {            /* tcp control type */
@@ -191,7 +195,7 @@ typedef struct {            /* serial control type */
     int state,wp,rp;        /* state,write/read pointer */
     int buffsize;           /* write buffer size (bytes) */
     HANDLE thread;          /* write thread */
-    lock_t lock;            /* lock flag */
+    rtk_lock_t lock;        /* lock flag */
     uint8_t *buff;          /* write buffer */
 #endif
     tcpsvr_t *tcpsvr;       /* tcp server for received stream */
@@ -250,13 +254,13 @@ typedef struct {            /* ftp download control type */
     char local[1024];       /* local file path */
     int topts[4];           /* time options {poff,tint,toff,tretry} (s) */
     gtime_t tnext;          /* next retry time (gpst) */
-    thread_t thread;        /* download thread */
+    rtk_thread_t thread;    /* download thread */
 } ftp_t;
 
 typedef struct {            /* memory buffer type */
     int state,wp,rp;        /* state,write/read pointer */
     int bufsize;            /* buffer size (bytes) */
-    lock_t lock;            /* lock flag */
+    rtk_lock_t lock;        /* lock flag */
     uint8_t *buf;           /* write buffer */
 } membuf_t;
 
@@ -285,12 +289,12 @@ static int readseribuff(serial_t *serial, uint8_t *buff, int nmax)
     
     tracet(5,"readseribuff: dev=%d\n",serial->dev);
     
-    lock(&serial->lock);
+    rtk_lock(&serial->lock);
     for (ns=0;serial->rp!=serial->wp&&ns<nmax;ns++) {
        buff[ns]=serial->buff[serial->rp];
        if (++serial->rp>=serial->buffsize) serial->rp=0;
     }
-    unlock(&serial->lock);
+    rtk_unlock(&serial->lock);
     tracet(5,"readseribuff: ns=%d rp=%d wp=%d\n",ns,serial->rp,serial->wp);
     return ns;
 }
@@ -300,7 +304,7 @@ static int writeseribuff(serial_t *serial, uint8_t *buff, int n)
     
     tracet(5,"writeseribuff: dev=%d n=%d\n",serial->dev,n);
     
-    lock(&serial->lock);
+    rtk_lock(&serial->lock);
     for (ns=0;ns<n;ns++) {
         serial->buff[wp=serial->wp]=buff[ns];
         if (++wp>=serial->buffsize) wp=0;
@@ -310,7 +314,7 @@ static int writeseribuff(serial_t *serial, uint8_t *buff, int n)
             break;
         }
     }
-    unlock(&serial->lock);
+    rtk_unlock(&serial->lock);
     tracet(5,"writeseribuff: ns=%d rp=%d wp=%d\n",ns,serial->rp,serial->wp);
     return ns;
 }
@@ -387,7 +391,7 @@ static serial_t *openserial(const char *path, int mode, char *msg)
     parity=(char)toupper((int)parity);
     
 #ifdef WIN32
-    sprintf(dev,"\\\\.\\%s",port);
+    sprintf(dev,"\\\\.\\%.120s",port);
     if (mode&STR_MODE_R) rw|=GENERIC_READ;
     if (mode&STR_MODE_W) rw|=GENERIC_WRITE;
     
@@ -422,7 +426,7 @@ static serial_t *openserial(const char *path, int mode, char *msg)
     PurgeComm(serial->dev,PURGE_TXABORT|PURGE_RXABORT|PURGE_TXCLEAR|PURGE_RXCLEAR);
     
     /* create write thread */
-    initlock(&serial->lock);
+    rtk_initlock(&serial->lock);
     serial->state=serial->wp=serial->rp=serial->error=0;
     serial->buffsize=buffsize;
     if (!(serial->buff=(uint8_t *)malloc(buffsize))) {
@@ -554,7 +558,11 @@ static int statexserial(serial_t *serial, char *msg)
     p+=sprintf(p,"serial:\n");
     p+=sprintf(p,"  state   = %d\n",state);
     if (!state) return 0;
-    p+=sprintf(p,"  dev     = %d\n",(int)serial->dev);
+#ifdef WIN32
+    p+=sprintf(p,"  dev     = %p\n",serial->dev);
+#else
+    p+=sprintf(p,"  dev     = %d\n",serial->dev);
+#endif
     p+=sprintf(p,"  error   = %d\n",serial->error);
 #ifdef WIN32
     p+=sprintf(p,"  buffsize= %d\n",serial->buffsize);
@@ -628,7 +636,7 @@ static int openfile_(file_t *file, gtime_t time, char *msg)
             timeset(gpst2utc(file->time));
         }
         else {
-            sprintf(tagh,"TIMETAG RTKLIB %s",VER_RTKLIB);
+            sprintf(tagh,"TIMETAG MALIB %s",VER_MALIB);
             memcpy(tagh+TIMETAGH_LEN-4,&file->tick_f,sizeof(file->tick_f));
             time_time=(uint32_t)file->time.time;
             time_sec=file->time.sec;
@@ -703,7 +711,7 @@ static file_t *openfile(const char *path, int mode, char *msg)
     file->start=start;
     file->speed=speed;
     file->swapintv=swapintv;
-    initlock(&file->lock);
+    rtk_initlock(&file->lock);
     
     time=utc2gpst(timeget());
     
@@ -790,8 +798,10 @@ static int statexfile(file_t *file, char *msg)
 /* read file -----------------------------------------------------------------*/
 static int readfile(file_t *file, uint8_t *buff, int nmax, char *msg)
 {
+#ifndef WIN32
     struct timeval tv={0};
     fd_set rs;
+#endif
     uint64_t fpos_8B;
     uint32_t t,tick,fpos_4B;
     long pos,n;
@@ -1848,61 +1858,144 @@ static void discon_ntripc(ntripc_t *ntripc, int i)
     ntripc->con[i].buff[0]='\0';
     ntripc->con[i].state=0;
 }
-/* send ntrip source table ---------------------------------------------------*/
-static void send_srctbl(ntripc_t *ntripc, socket_t sock)
+/* http date-time string -----------------------------------------------------*/
+static void time_str_http(char *buff)
 {
-    char srctbl[512+NTRIP_MAXSTR],buff[256],*p=buff;
+    static const char *month[]={
+        "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
+    };
+    static const char *wkday[]={
+        "Mon","Tue","Wed","Thu","Fri","Sat","Sun"
+    };
+    time_t tt=time(NULL);
+    struct tm *tm=gmtime(&tt);
 
+    sprintf(buff,"%s, %02d %s %04d %02d:%02d:%02d GMT",wkday[tm->tm_wday],
+            tm->tm_mday,month[tm->tm_mon],1900+tm->tm_year,tm->tm_hour,
+            tm->tm_min,tm->tm_sec);
+}
+/* send NTRIP source table ---------------------------------------------------*/
+static void send_srctbl(ntripc_t *ntripc, int ver, socket_t sock)
+{
+    char srctbl[512+NTRIP_MAXSTR],buff[256],tstr[64],*p=buff;
+    
     sprintf(srctbl,"STR;%s;%s\r\n%s\r\n",ntripc->mntpnt,ntripc->srctbl,
             NTRIP_RSP_TBLEND);
-    p+=sprintf(p,"%s",NTRIP_RSP_SRCTBL);
-    p+=sprintf(p,"Server: %s %s %s\r\n","RTKLIB",VER_RTKLIB,PATCH_LEVEL);
-    p+=sprintf(p,"Date: %s UTC\r\n",time_str(timeget(),0));
+    
+    if (ver==1) { /* NTRIP ver.1 */
+        p+=sprintf(p,"%s",NTRIP_RSP_SRCTBL);
+    }
+    else { /* NTRIP ver.2 */
+        p+=sprintf(p,"HTTP/1.1 200 OK\r\n");
+        p+=sprintf(p,"Ntrip-Version: Ntrip/2.0\r\n");
+        p+=sprintf(p,"Ntrip-Flags: \r\n");
+    }
+    time_str_http(tstr);
+    p+=sprintf(p,"Server: NTRIP %s/%s %s\r\n","MALIB",VER_MALIB,PATCH_LEVEL_MALIB);
+    p+=sprintf(p,"Date: %s\r\n",tstr);
     p+=sprintf(p,"Connection: close\r\n");
-    p+=sprintf(p,"Content-Type: text/plain\r\n");
+    p+=sprintf(p,"Content-Type: %s\r\n",
+               (ver==1)?"text/plain":"gnss/sourcetable");
     p+=sprintf(p,"Content-Length: %d\r\n\r\n",(int)strlen(srctbl));
     send_nb(sock,(uint8_t *)buff,(int)(p-buff));
     send_nb(sock,(uint8_t *)srctbl,(int)strlen(srctbl));
 }
+/* send OK response ----------------------------------------------------------*/
+static void send_rsp_ok(int ver, socket_t sock)
+{
+    char buff[512],tstr[64],*p=buff;
+    
+    if (ver==1) { /* NTRIP ver.1 */
+        p+=sprintf(p,"%s",NTRIP_RSP_OK_CLI);
+    }
+    else { /* NTRIP ver.2 */
+        time_str_http(tstr);
+        p+=sprintf(p,"HTTP/1.1 200 OK\r\n");
+        p+=sprintf(p,"Ntrip-Version: Ntrip/2.0\r\n");
+        p+=sprintf(p,"Server: NTRIP %s/%s %s\r\n","MALIB",VER_MALIB,
+                   PATCH_LEVEL_MALIB);
+        p+=sprintf(p,"Date: %s\r\n",tstr);
+        p+=sprintf(p,"Cache-Control: no-store, no-cache, max-age=0\r\n");
+        p+=sprintf(p,"Pragma: no-cache\r\n");
+        p+=sprintf(p,"Connection: close\r\n");
+        p+=sprintf(p,"Content-Type: gnss/data\r\n\r\n");
+    }
+    send_nb(sock,(uint8_t *)buff,(int)(p-buff));
+}
+/* send error response -------------------------------------------------------*/
+static void send_rsp_err(ntripc_t *ntripc, int ver, int err, socket_t sock)
+{
+    char buff[512],tstr[64],*p=buff;
+    
+    if (ver==1) { /* NTRIP ver.1 */
+        if (err==404) {
+            send_srctbl(ntripc,ver,sock); /* send source table if no mp */
+            return;
+        }
+        p+=sprintf(p,"%s",NTRIP_RSP_UNAUTH);
+    }
+    else { /* NTRIP ver.2 */
+        time_str_http(tstr);
+        p+=sprintf(p,"HTTP/1.1 %d %s\r\n",err,(err==404)?"Not Found":
+                   "Unauthorized");
+        p+=sprintf(p,"Ntrip-Version: Ntrip/2.0\r\n");
+        p+=sprintf(p,"Server: NTRIP %s/%s %s\r\n","MALIB",VER_MALIB,
+                   PATCH_LEVEL_MALIB);
+        p+=sprintf(p,"Date: %s\r\n",tstr);
+        p+=sprintf(p,"Content-Type: text/html\r\n");
+        p+=sprintf(p,"Connection: close\r\n\r\n");
+        p+=sprintf(p,"%s\r\n",(err==404)?"Mountpoint of request not found":
+                   "No or wrong authorization");
+    }
+    send_nb(sock,(uint8_t *)buff,(int)(p-buff));
+}
 /* test ntrip client request -------------------------------------------------*/
 static void rsp_ntripc(ntripc_t *ntripc, int i)
 {
-    const char *rsp1=NTRIP_RSP_UNAUTH,*rsp2=NTRIP_RSP_OK_CLI;
     ntripc_con_t *con=ntripc->con+i;
     char url[256]="",mntpnt[256]="",proto[256]="",user[513],user_pwd[256],*p,*q;
+    int ver=1;
     
-    tracet(3,"rspntripc_c i=%d\n",i);
+    tracet(3,"rsp_ntripc=%d\n",i);
     con->buff[con->nb]='\0';
-    tracet(5,"rspntripc_c: n=%d,buff=\n%s\n",con->nb,con->buff);
+    tracet(5,"rsp_ntripc: n=%d,buff=\n%s\n",con->nb,con->buff);
     
     if (con->nb>=NTRIP_MAXRSP-1) { /* buffer overflow */
-        tracet(2,"rsp_ntripc_c: request buffer overflow\n");
+        tracet(2,"rsp_ntripc: request buffer overflow\n");
         discon_ntripc(ntripc,i);
         return;
     }
     /* test GET and User-Agent */
     if (!(p=strstr((char *)con->buff,"GET"))||!(q=strstr(p,"\r\n"))||
         !(q=strstr(q,"User-Agent:"))||!strstr(q,"\r\n")) {
-        tracet(2,"rsp_ntripc_c: NTRIP request error\n");
+        tracet(2,"rsp_ntripc: NTRIP request error\n");
         discon_ntripc(ntripc,i);
         return;
     }
     /* test protocol */
     if (sscanf(p,"GET %255s %255s",url,proto)<2||
         (strcmp(proto,"HTTP/1.0")&&strcmp(proto,"HTTP/1.1"))) {
-        tracet(2,"rsp_ntripc_c: NTRIP request error proto=%s\n",proto);
+        tracet(2,"rsp_ntripc: NTRIP request error proto=%s\n",proto);
         discon_ntripc(ntripc,i);
         return;
     }
+    /* test NTRIP version */
+    if ((p=strstr((char *)con->buff,"Ntrip-Version:"))) {
+        sscanf(p+14," Ntrip/%d",&ver);
+    }
     if ((p=strchr(url,'/'))) strcpy(mntpnt,p+1);
     
-    /* test mountpoint */
-    if (!*mntpnt||strcmp(mntpnt,ntripc->mntpnt)) {
-        tracet(2,"rsp_ntripc_c: no mountpoint %s\n",mntpnt);
-        
-        /* send source table */
-        send_srctbl(ntripc,ntripc->tcp->cli[i].sock);
+    /* source table request */
+    if (!*mntpnt) {
+        send_srctbl(ntripc,ver,ntripc->tcp->cli[i].sock);
         discon_ntripc(ntripc,i);
+        return;
+    }
+    /* test mountpoint */
+    if (strcmp(mntpnt,ntripc->mntpnt)) {
+        send_rsp_err(ntripc,ver,404,ntripc->tcp->cli[i].sock);
+        discon_ntripc(ntripc,i);
+        tracet(2,"rsp_ntripc: no mountpoint %s\n",mntpnt);
         return;
     }
     /* test authentication */
@@ -1913,14 +2006,14 @@ static void rsp_ntripc(ntripc_t *ntripc, int i)
         q+=encbase64(q,(uint8_t *)user,strlen(user));
         if (!(p=strstr((char *)con->buff,"Authorization:"))||
             strncmp(p,user_pwd,strlen(user_pwd))) {
-            tracet(2,"rsp_ntripc_c: authroziation error\n");
-            send_nb(ntripc->tcp->cli[i].sock,(uint8_t *)rsp1,strlen(rsp1));
+            send_rsp_err(ntripc,ver,401,ntripc->tcp->cli[i].sock);
             discon_ntripc(ntripc,i);
+            tracet(2,"rsp_ntripc: authorization error\n");
             return;
         }
     }
     /* send OK response */
-    send_nb(ntripc->tcp->cli[i].sock,(uint8_t *)rsp2,strlen(rsp2));
+    send_rsp_ok(ver,ntripc->tcp->cli[i].sock);
     
     con->state=1;
     strcpy(con->mntpnt,mntpnt);
@@ -2490,7 +2583,7 @@ static membuf_t *openmembuf(const char *path, char *msg)
         return NULL;
     }
     membuf->bufsize=bufsize;
-    initlock(&membuf->lock);
+    rtk_initlock(&membuf->lock);
     
     sprintf(msg,"membuf sizebuf=%d",bufsize);
     
@@ -2513,14 +2606,17 @@ static int readmembuf(membuf_t *membuf, uint8_t *buff, int n, char *msg)
     
     if (!membuf) return 0;
     
-    lock(&membuf->lock);
+    rtk_lock(&membuf->lock);
     
     for (i=membuf->rp;i!=membuf->wp&&nr<n;i++) {
-        if (i>=membuf->bufsize) i=0;
+        if (i>=membuf->bufsize) {
+            i=0;
+            if (i==membuf->wp) break;
+        }
         buff[nr++]=membuf->buf[i];
     }
     membuf->rp=i;
-    unlock(&membuf->lock);
+    rtk_unlock(&membuf->lock);
     return nr;
 }
 /* write memory buffer -------------------------------------------------------*/
@@ -2532,7 +2628,7 @@ static int writemembuf(membuf_t *membuf, uint8_t *buff, int n, char *msg)
     
     if (!membuf) return 0;
     
-    lock(&membuf->lock);
+    rtk_lock(&membuf->lock);
     
     for (i=0;i<n;i++) {
         membuf->buf[membuf->wp++]=buff[i];
@@ -2540,11 +2636,11 @@ static int writemembuf(membuf_t *membuf, uint8_t *buff, int n, char *msg)
         if (membuf->wp==membuf->rp) {
            strcpy(msg,"mem-buffer overflow");
            membuf->state=-1;
-           unlock(&membuf->lock);
+           rtk_unlock(&membuf->lock);
            return i+1;
         }
     }
-    unlock(&membuf->lock);
+    rtk_unlock(&membuf->lock);
     return i;
 }
 /* get state memory buffer ---------------------------------------------------*/
@@ -2596,7 +2692,7 @@ extern void strinit(stream_t *stream)
     stream->state=0;
     stream->inb=stream->inr=stream->outb=stream->outr=0;
     stream->tick_i=stream->tick_o=stream->tact=stream->inbt=stream->outbt=0;
-    initlock(&stream->lock);
+    rtk_initlock(&stream->lock);
     stream->port=NULL;
     stream->path[0]='\0';
     stream->msg [0]='\0';
@@ -2802,8 +2898,8 @@ extern void strsync(stream_t *stream1, stream_t *stream2)
 * args   : stream_t *stream I  stream
 * return : none
 *-----------------------------------------------------------------------------*/
-extern void strlock  (stream_t *stream) {lock  (&stream->lock);}
-extern void strunlock(stream_t *stream) {unlock(&stream->lock);}
+extern void strlock  (stream_t *stream) {rtk_lock  (&stream->lock);}
+extern void strunlock(stream_t *stream) {rtk_unlock(&stream->lock);}
 
 /* read stream -----------------------------------------------------------------
 * read data from stream (unblocked)

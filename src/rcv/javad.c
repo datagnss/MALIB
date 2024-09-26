@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * javad.c : javad receiver dependent functions
 *
-*          Copyright (C) 2011-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2011-2023 by T.TAKASU, All rights reserved.
 *
 * reference :
 *     [1] Javad GNSS, GREIS GNSS Receiver External Interface Specification,
@@ -51,6 +51,7 @@
 *                           fix bug on decoding SVH in message [NE] for GLONASS
 *                           use API code2idx() to get freq-index
 *                           use integer types in stdint.h
+*           2023/01/12 1.17 support ephemeris type in eph_t
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -506,6 +507,7 @@ static int decode_eph(raw_t *raw, int sys)
             trace(2,"javad ephemeris satellite error: sys=%d prn=%d\n",sys,prn);
             return -1;
         }
+        eph.type=0; /* ephemeris type = LNAV */
         eph.flag=(flag>>1)&1;
         eph.code=(flag>>2)&3;
         eph.fit =flag&1;
@@ -535,6 +537,7 @@ static int decode_eph(raw_t *raw, int sys)
         if (!(eph_sel&1)&&set==0) return 0;
         if (!(eph_sel&2)&&set==1) return 0; 
         eph.code=set?(1<<1)+(1<<8):(1<<0)+(1<<2)+(1<<9);
+        eph.type=set; /* ephemeris type = I/NAV or F/NAV */
         
         /* gal-week = gst-week + 1024 */
         eph.week=week+1024;
@@ -554,6 +557,7 @@ static int decode_eph(raw_t *raw, int sys)
             trace(2,"javad ephemeris satellite error: sys=%d prn=%d\n",sys,prn);
             return -1;
         }
+        eph.type=(prn>=6&&prn<=58)?0:1; /* ephemeris type = D1 or D2 */
         eph.tgd[1]=R4(p); p+=4;    /* TGD2 (s) */
         sigtype   =U1(p);          /* signal type: 0:B1,1:B2,2:B3 */
         eph.code=(sigtype==0)?1:((sigtype==1)?3:((sigtype==2)?5:0));

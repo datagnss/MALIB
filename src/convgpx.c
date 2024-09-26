@@ -95,7 +95,7 @@ static int savegpx(const char *file, const solbuf_t *solbuf, int outtrk,
         return 0;
     }
     fprintf(fp,HEADXML);
-    fprintf(fp,HEADGPX,"RTKLIB " VER_RTKLIB,XMLNS);
+    fprintf(fp,HEADGPX,"MALIB " VER_MALIB,XMLNS);
     
     /* output waypoint */
     if (outpnt) {

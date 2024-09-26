@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * options.c : options functions
 *
-*          Copyright (C) 2010-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2010-2021 by T.TAKASU, All rights reserved.
 *
 * version : $Revision:$ $Date:$
 * history : 2010/07/20  1.1  moved from postpos.c
@@ -27,6 +27,10 @@
 *           2020/11/30  1.12 change options pos1-frequency, pos1-ionoopt,
 *                             pos1-tropopt, pos1-sateph, pos1-navsys,
 *                             pos2-gloarmode,
+*           2021/01/11  1.13 remove EXPORT
+*           2021/05/07  1.14 add file-elmaskfile
+*           2024/02/01  1.15 branch from ver.2.4.3b35 for MALIB
+*                            add pos2-arsys,pos2-ign_chierr
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -62,8 +66,12 @@ static char snrmask_[NFREQ][1024];
 #define POSOPT  "0:llh,1:xyz,2:single,3:posfile,4:rinexhead,5:rtcm,6:raw"
 #define TIDEOPT "0:off,1:on,2:otl"
 #define PHWOPT  "0:off,1:on,2:precise"
+#define SIGOPT1 "0:L1C/A-L2P,1:L1C/A-L2C"
+#define SIGOPT2 "0:L1C/A-L2P,1:L1C/A-L2C,2:L1C/A-L5"
+#define SIGOPT3 "0:L1C-L5,1:L1C/A-L2C"
+#define SIGOPT4 "0:E1C-E5a,1:E1C-E5b"
 
-EXPORT opt_t sysopts[]={
+opt_t sysopts[]={
     {"pos1-posmode",    3,  (void *)&prcopt_.mode,       MODOPT },
     {"pos1-frequency",  3,  (void *)&prcopt_.nf,         FRQOPT },
     {"pos1-soltype",    3,  (void *)&prcopt_.soltype,    TYPOPT },
@@ -90,6 +98,7 @@ EXPORT opt_t sysopts[]={
     {"pos2-armode",     3,  (void *)&prcopt_.modear,     ARMOPT },
     {"pos2-gloarmode",  3,  (void *)&prcopt_.glomodear,  GAROPT },
     {"pos2-bdsarmode",  3,  (void *)&prcopt_.bdsmodear,  SWTOPT },
+    {"pos2-arsys",      0,  (void *)&prcopt_.arsys,      NAVOPT },
     {"pos2-arthres",    1,  (void *)&prcopt_.thresar[0], ""     },
     {"pos2-arthres1",   1,  (void *)&prcopt_.thresar[1], ""     },
     {"pos2-arthres2",   1,  (void *)&prcopt_.thresar[2], ""     },
@@ -109,6 +118,12 @@ EXPORT opt_t sysopts[]={
     {"pos2-niter",      0,  (void *)&prcopt_.niter,      ""     },
     {"pos2-baselen",    1,  (void *)&prcopt_.baseline[0],"m"    },
     {"pos2-basesig",    1,  (void *)&prcopt_.baseline[1],"m"    },
+    {"pos2-siggpsIIR-M",0,  (void *)&prcopt_.pppsig[0],  SIGOPT1},
+    {"pos2-siggpsIIF",  0,  (void *)&prcopt_.pppsig[1],  SIGOPT2},
+    {"pos2-siggpsIIIA", 0,  (void *)&prcopt_.pppsig[2],  SIGOPT2},
+    {"pos2-sigqzs1_2",  0,  (void *)&prcopt_.pppsig[3],  SIGOPT3},
+    {"pos2-siggal   ",  0,  (void *)&prcopt_.pppsig[4],  SIGOPT4},
+    {"pos2-ign_chierr", 3,  (void *)&prcopt_.ign_chierr, SWTOPT },
     
     {"out-solformat",   3,  (void *)&solopt_.posf,       SOLOPT },
     {"out-outhead",     3,  (void *)&solopt_.outhead,    SWTOPT },
@@ -170,6 +185,7 @@ EXPORT opt_t sysopts[]={
     {"misc-rnxopt1",    2,  (void *)prcopt_.rnxopt[0],   ""     },
     {"misc-rnxopt2",    2,  (void *)prcopt_.rnxopt[1],   ""     },
     {"misc-pppopt",     2,  (void *)prcopt_.pppopt,      ""     },
+    {"misc-rtcmopt",    2,  (void *)&prcopt_.rtcmopt,    ""     },
     
     {"file-satantfile", 2,  (void *)&filopt_.satantp,    ""     },
     {"file-rcvantfile", 2,  (void *)&filopt_.rcvantp,    ""     },
@@ -179,6 +195,7 @@ EXPORT opt_t sysopts[]={
     {"file-dcbfile",    2,  (void *)&filopt_.dcb,        ""     },
     {"file-eopfile",    2,  (void *)&filopt_.eop,        ""     },
     {"file-blqfile",    2,  (void *)&filopt_.blq,        ""     },
+    {"file-elmaskfile", 2,  (void *)&filopt_.elmask,     ""     },
     {"file-tempdir",    2,  (void *)&filopt_.tempdir,    ""     },
     {"file-geexefile",  2,  (void *)&filopt_.geexe,      ""     },
     {"file-solstatfile",2,  (void *)&filopt_.solstat,    ""     },

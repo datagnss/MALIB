@@ -140,8 +140,9 @@ static int read_poly(FILE *fp, double *bound, gisd_t **p)
         return 0;
     }
     for (i=0;i<nt;i++) {
-        fread(buff,4,1,fp);
-        part[i]=I4_L(buff);
+        if (fread(buff,4,1,fp)==1) {
+            part[i]=I4_L(buff);
+        }
     }
     for (i=0;i<nt;i++) {
         nr=(i<nt-1?part[i+1]:np)-part[i];
@@ -203,8 +204,9 @@ static int read_polygon(FILE *fp, double *bound, gisd_t **p)
         return 0;
     }
     for (i=0;i<nt;i++) {
-        fread(buff,4,1,fp);
-        part[i]=I4_L(buff);
+        if (fread(buff,4,1,fp)==1) {
+            part[i]=I4_L(buff);
+        }
     }
     for (i=0;i<nt;i++) {
         nr=(i<nt-1?part[i+1]:np)-part[i];
@@ -286,7 +288,7 @@ static int gis_read_record(FILE *fp, FILE *fp_idx, int type, double *bound,
         }
         else { /* skip record */
             for (i=0;i<len1-4;i++) {
-                fread(buff,1,1,fp);
+                if (fread(buff,1,1,fp)==1) ;
             }
         }
     }
@@ -309,7 +311,7 @@ static int gis_read_record(FILE *fp, FILE *fp_idx, int type, double *bound,
 extern int gis_read(const char *file, gis_t *gis, int layer)
 {
     FILE *fp,*fp_idx;
-    char path[1024],*p,*q;
+    char path[1024],*p;
     int type1=0,type2=0;
     
     trace(3,"gis_read file=%s layer=%d\n",file,layer);

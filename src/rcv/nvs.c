@@ -2,7 +2,7 @@
 * nvs.c : NVS receiver dependent functions
 *
 *    Copyright (C) 2012-2016 by M.BAVARO and T.TAKASU, All rights reserved.
-*    Copyright (C) 2014-2020 by T.TAKASU, All rights reserved.
+*    Copyright (C) 2014-2023 by T.TAKASU, All rights reserved.
 *
 *     [1] Description of BINR messages which is used by RC program for RINEX
 *         files accumulation, NVS
@@ -20,6 +20,7 @@
 *           2017/04/11 1.7  (char *) -> (signed char *)
 *           2020/07/10 1.8  suppress warnings
 *           2020/11/30 1.9  use integer type in stdint.h
+*           2023/01/12 1.10 support ephemeris type in eph_t
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -225,6 +226,7 @@ static int decode_gpsephem(int sat, raw_t *raw)
         if (eph.iode==raw->nav.eph[sat-1].iode) return 0; /* unchanged */
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
     raw->nav.eph[sat-1]=eph;
     raw->ephsat=sat;
     raw->ephset=0;

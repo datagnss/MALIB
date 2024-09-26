@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * ublox.c : ublox receiver dependent functions
 *
-*          Copyright (C) 2007-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2023 by T.TAKASU, All rights reserved.
 *          Copyright (C) 2014 by T.SUZUKI, All rights reserved.
 *
 * reference :
@@ -15,6 +15,8 @@
 *         including Protocol Specification V15.00-18.00, January, 2016
 *     [5] ublox-AG, UBX-18010854-R08, u-blox ZED-F9P Interface Description,
 *         May, 2020
+*     [6] u-blox D9 QZS 1.01, UBX-21031777-R01 C1-Public, u-blox D9
+*         QZSS correction service receiver Interface Description, Sep, 2021
 *
 * version : $Revision: 1.2 $ $Date: 2008/07/14 00:05:05 $
 * history : 2007/10/08 1.0  new
@@ -75,6 +77,12 @@
 *                           support QZSS L1S (CODE_L1Z)
 *                           CODE_L1I -> CODE_L2I for BDS B1I (RINEX 3.04)
 *                           use integer types in stdint.h
+*           2023/01/06 1.29 support UBX-RXM-QZSSL6 and UBX-NAV-TIMEGPS for D9C
+*                           add option -OUT_QZSSL6
+*           2024/02/01 1.30 branch from ver.2.4.3b35 for MALIB
+*                           add L6E message decoding for UBX-RXM-QZSSL6
+*           2024/03/01 1.31 improved performance of the decode_rxmqzssl6()
+*           2024/08/02 1.32 suppress warnings
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -90,6 +98,7 @@
 #define ID_RXMSFRB  0x0211      /* ubx message id: subframe buffer */
 #define ID_RXMSFRBX 0x0213      /* ubx message id: raw subframe data */
 #define ID_RXMRAWX  0x0215      /* ubx message id: multi-gnss raw meas data */
+#define ID_RXMQZSSL6 0x0273     /* ubx message id: qzss L6 message */
 #define ID_TRKD5    0x030A      /* ubx message id: trace mesurement data */
 #define ID_TRKMEAS  0x0310      /* ubx message id: trace mesurement data */
 #define ID_TRKSFRBX 0x030F      /* ubx message id: trace subframe buffer */
@@ -106,7 +115,11 @@
 
 #define P2_10       0.0009765625 /* 2^-10 */
 
+#if 0
 #define CPSTD_VALID 5           /* std-dev threshold of carrier-phase valid */
+#else
+#define CPSTD_VALID 14          /* std-dev threshold of carrier-phase valid */
+#endif
 
 #define ROUND(x)    (int)floor((x)+0.5)
 
@@ -172,6 +185,7 @@ static int ubx_sig(int sys, int sigid)
         if (sigid==0) return CODE_L1C; /* L1C/A */
         if (sigid==3) return CODE_L2L; /* L2CL */
         if (sigid==4) return CODE_L2S; /* L2CM */
+        if (sigid==7) return CODE_L5Q; /* L5Q  */
     }
     else if (sys==SYS_GLO) {
         if (sigid==0) return CODE_L1C; /* G1C/A (GLO L1 OF) */
@@ -180,6 +194,7 @@ static int ubx_sig(int sys, int sigid)
     else if (sys==SYS_GAL) {
         if (sigid==0) return CODE_L1C; /* E1C */
         if (sigid==1) return CODE_L1B; /* E1B */
+        if (sigid==4) return CODE_L5Q; /* E5aQ */
         if (sigid==5) return CODE_L7I; /* E5bI */
         if (sigid==6) return CODE_L7Q; /* E5bQ */
     }
@@ -188,6 +203,7 @@ static int ubx_sig(int sys, int sigid)
         if (sigid==1) return CODE_L1Z; /* L1S */
         if (sigid==4) return CODE_L2S; /* L2CM */
         if (sigid==5) return CODE_L2L; /* L2CL */
+        if (sigid==9) return CODE_L5Q; /* L5Q */
     }
     else if (sys==SYS_CMP) {
         if (sigid==0) return CODE_L2I; /* B1I D1 */
@@ -445,19 +461,27 @@ static int decode_navsol(raw_t *raw)
 /* decode UBX-NAV-TIMEGPS: GPS time solution ---------------------------------*/
 static int decode_navtime(raw_t *raw)
 {
+    double ep[6];
     int itow,ftow,week;
+    char str[32];
     uint8_t *p=raw->buff+6;
     
     trace(4,"decode_navtime: len=%d\n",raw->len);
     
-    if (raw->outtype) {
-        sprintf(raw->msgtype,"UBX NAV-TIME  (%4d):",raw->len);
-    }
     itow=U4(p);
     ftow=I4(p+4);
     week=U2(p+8);
     if ((U1(p+11)&0x03)==0x03) {
         raw->time=gpst2time(week,itow*1E-3+ftow*1E-9);
+    }
+    if (raw->outtype) {
+        time2str(raw->time, str, 3);
+        sprintf(raw->msgtype,"UBX NAV-TIME  (%4d): time=%s",raw->len,str);
+    }
+    if (strstr(raw->opt,"-OUT_QZSSL6")) {
+        time2epoch(gpst2utc(raw->time),ep);
+        trace(2,"$TIME,%.0f,%.0f,%.0f,%.0f,%.0f,%.6f\n",ep[0],ep[1],ep[2],ep[3],
+          ep[4],ep[5]);
     }
     return 0;
 }
@@ -793,8 +817,6 @@ static int decode_enav(raw_t *raw, int sat, int off)
         trace(2,"ubx rxmsfrbx enav length error: sat=%d len=%d\n",sat,raw->len);
         return -1;
     }
-    if (raw->len<44+off) return 0; /* E5b I/NAV */
-    
     for (i=0;i<8;i++,p+=4) {
         setbitu(buff,32*i,32,U4(p));
     }
@@ -834,7 +856,7 @@ static int decode_enav(raw_t *raw, int sat, int off)
         trace(2,"ubx rxmsfrbx enav satellite error: sat=%d %d\n",sat,eph.sat);
         return -1;
     }
-    eph.code|=(1<<0); /* data source: E1 */
+    eph.code|=(1<<0)|(1<<2); /* data source: E1 and E5b */
     
     adj_utcweek(raw->time,utc);
     matcpy(raw->nav.ion_gal,ion,4,1);
@@ -1092,8 +1114,54 @@ static int decode_rxmsfrb(raw_t *raw)
     }
     return 0;
 }
+/* decode UBX-RXM-QZSSL6: QZSS L6 message ------------------------------------*/
+static int decode_rxmqzssl6(raw_t *raw, rtcm_t *rtcm)
+{
+    static int count[16][2]={{0}};
+    uint8_t *p=raw->buff+6;
+    double cn0,time;
+    char buff[1024]="",*q=buff;
+    int i,ver,prn,msg,nerr,stat,ret;
+    
+    if (raw->len<272) {
+        trace(2,"ubx rxmqzssl6 length error: len=%d\n",raw->len);
+        return -1;
+    }
+    ver =U1(p);
+    prn =U1(p+1)+192;
+    msg =(U2(p+10)>>10)&1; /* message name 0:L6D,1:L6E */
+    cn0 =U2(p+2)/256.0;    /* C/N0 (dBHz) */
+    time=U4(p+4)*1e-3;     /* time tag (s) */
+    nerr=U2(p+9);          /* number of errors corrected */
+    stat=(U2(p+10)>>12)&3; /* error status 0:unknown,1:err-free,2:erroneous */
+    
+    if (raw->outtype) {
+        sprintf(raw->msgtype,"UBX RXM-QZSSL6(%4d): ver=%d prn=%2d msg=%s cn0=%.1f nerr=%2d stat=%d",
+            raw->len,ver,prn,msg?"L6E":"L6D",cn0,nerr,stat);
+    }
+    if (strstr(raw->opt,"-OUT_QZSSL6")) {
+        if (stat>=1) {
+            count[prn-192][stat==1?0:1]++;
+        }
+        if (stat==1) {
+            trace(2,"$CH,%.3f,%s,%d,%d,%.1f,%.9f,%.3f,%.3f,%d,%d\n",time,
+                  msg?"L6E":"L6D",prn,0,cn0,0.0,0.0,0.0,count[prn-192][0],
+                  count[prn-192][1]);
+            for (i=0;i<250;i++) {
+                q+=sprintf(q,"%02X",U1(p+14+i));
+            }
+            trace(2,"$L6FRM,%.3f,%s,%d,%d,%s\n",time,msg?"L6E":"L6D",prn,nerr,buff);
+        }
+    }
+    ret=0;
+    if (stat==1) {
+        memcpy(rtcm->buff,p+14,250);
+        ret=decode_qzss_l6emsg(rtcm);
+    }
+    return ret;
+}
 /* decode ublox raw message --------------------------------------------------*/
-static int decode_ubx(raw_t *raw)
+static int decode_ubx(raw_t *raw, rtcm_t *rtcm)
 {
     int type=(U1(raw->buff+2)<<8)+U1(raw->buff+3);
     
@@ -1109,6 +1177,7 @@ static int decode_ubx(raw_t *raw)
         case ID_RXMRAWX : return decode_rxmrawx (raw);
         case ID_RXMSFRB : return decode_rxmsfrb (raw);
         case ID_RXMSFRBX: return decode_rxmsfrbx(raw);
+        case ID_RXMQZSSL6: return decode_rxmqzssl6(raw,rtcm);
         case ID_NAVSOL  : return decode_navsol  (raw);
         case ID_NAVTIME : return decode_navtime (raw);
         case ID_TRKMEAS : return decode_trkmeas (raw);
@@ -1116,7 +1185,7 @@ static int decode_ubx(raw_t *raw)
         case ID_TRKSFRBX: return decode_trksfrbx(raw);
     }
     if (raw->outtype) {
-        sprintf(raw->msgtype,"UBX 0x%02X 0x%02X (%4d)",type>>8,type&0xF,
+        sprintf(raw->msgtype,"UBX 0x%02X 0x%02X (%4d)",type>>8,type&0xFF,
                 raw->len);
     }
     return 0;
@@ -1130,6 +1199,7 @@ static int sync_ubx(uint8_t *buff, uint8_t data)
 /* input ublox raw message from stream -----------------------------------------
 * fetch next ublox raw data and input a mesasge from stream
 * args   : raw_t *raw       IO  receiver raw data control struct
+*          rtcm_t *rtcm     IO  rtcm control struct
 *          uint8_t data     I   stream data (1 byte)
 * return : status (-1: error message, 0: no message, 1: input observation data,
 *                  2: input ephemeris, 3: input sbas message,
@@ -1142,6 +1212,7 @@ static int sync_ubx(uint8_t *buff, uint8_t data)
 *          -INVCP     : invert polarity of carrier-phase
 *          -TADJ=tint : adjust time tags to multiples of tint (sec)
 *          -STD_SLIP=std: slip by std-dev of carrier phase under std
+*          -OUT_QZSSL6: output QZSS L6 message to tracefile
 *
 *          The supported messages are as follows.
 *
@@ -1149,13 +1220,15 @@ static int sync_ubx(uint8_t *buff, uint8_t data)
 *          UBX-RXM-RAWX : multi-gnss measurement data
 *          UBX-RXM-SFRB : subframe buffer
 *          UBX-RXM-SFRBX: subframe buffer extension
+*          UBX-RXM-QZSSL6: QZSS L6 message by D9C
+*          UBX-NAV-TIMEGPS: time info by D9C
 *
 *          UBX-TRK-MEAS and UBX-TRK-SFRBX are based on NEO-M8N (F/W 2.01).
 *          UBX-TRK-D5 is based on NEO-7N (F/W 1.00). They are not formally
 *          documented and not supported by u-blox.
 *          Users can use these messages by their own risk.
 *-----------------------------------------------------------------------------*/
-extern int input_ubx(raw_t *raw, uint8_t data)
+extern int input_ubx(raw_t *raw, rtcm_t *rtcm, uint8_t data)
 {
     trace(5,"input_ubx: data=%02x\n",data);
     
@@ -1178,15 +1251,16 @@ extern int input_ubx(raw_t *raw, uint8_t data)
     raw->nbyte=0;
     
     /* decode ublox raw message */
-    return decode_ubx(raw);
+    return decode_ubx(raw,rtcm);
 }
 /* input ublox raw message from file -------------------------------------------
 * fetch next ublox raw data and input a message from file
 * args   : raw_t  *raw      IO  receiver raw data control struct
+*          rtcm_t *rtcm     IO  rtcm control struct
 *          FILE   *fp       I   file pointer
 * return : status(-2: end of file, -1...9: same as above)
 *-----------------------------------------------------------------------------*/
-extern int input_ubxf(raw_t *raw, FILE *fp)
+extern int input_ubxf(raw_t *raw, rtcm_t *rtcm, FILE *fp)
 {
     int i,data;
     
@@ -1212,7 +1286,7 @@ extern int input_ubxf(raw_t *raw, FILE *fp)
     raw->nbyte=0;
     
     /* decode ubx raw message */
-    return decode_ubx(raw);
+    return decode_ubx(raw,rtcm);
 }
 /* convert string to integer -------------------------------------------------*/
 static int stoi(const char *s)
@@ -1280,7 +1354,7 @@ extern int gen_ubx(const char *msg, uint8_t *buff)
         0x00,0x1B,0x01,0x17,0x08,0x09,0x07,0x1A,0x06,0x02,
         0x04,0x11,0x13,0x0E,0x16,0x80,0x10,0x19,0x1D,0x12,
         0x3E,0x39,0x47,0x24,0x23,0x1E,0x3B,0x57,0x34,0x62,
-        0x36,0x71,0x31,0x53,
+        0x3D,0x71,0x31,0x53,
         0x8c,0x8b,0x8a
     };
     const int prm[][32]={
@@ -1318,7 +1392,8 @@ extern int gen_ubx(const char *msg, uint8_t *buff)
         {FU1,FU1},                                /* RINV */
         {FU1,FU1,FU2,FU2,FU1,FU1,FU2,FU2,FU2,FU2,FU4}, /* SMGR */
         {FU1,FU1,FU2,FI4,FI4,FI4,FU4,FU4,FU4},    /* TMODE2 */
-        {FU1,FU1,FU2,FI4,FI4,FI4,FU4,FU4,FU4},    /* TMODE3 */
+        {FU1,FU1,FU2,FI4,FI4,FI4,FI1,FI1,FI1,FU1,FU4,FU4,FU4,FU1,FU1,FU1,FU1,FU1,
+         FU1,FU1,FU1},                            /* TMODE3 */
         {FU1,FU1,FU1,FU1,FI2,FI2,FU4,FU4,FU4,FU4,FI4,FU4}, /* TPS */
         {FU1,FU1,FU1,FU1,FU4,FU4,FU4,FU4,FU4},    /* TXSLOT */
         {FU1,FU1,FU1,FU1},                        /* VALDEL */

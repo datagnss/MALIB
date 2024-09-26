@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * ephemeris.c : satellite ephemeris and clock functions
 *
-*          Copyright (C) 2010-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2010-2021 by T.TAKASU, All rights reserved.
 *
 * references :
 *     [1] IS-GPS-200K, Navstar GPS Space Segment/Navigation User Interfaces,
@@ -25,6 +25,7 @@
 *         Navigation office, February, 2019
 *     [10] RTCM Standard 10403.3, Differential GNSS (Global Navigation
 *         Satellite Systems) Services - version 3, October 7, 2016
+*     [11] CAO IS-QZSS-MDC-002, November, 2023
 *
 * version : $Revision:$ $Date:$
 * history : 2010/07/28 1.1  moved from rtkcmn.c
@@ -70,6 +71,9 @@
 *                           fix bug on clock reference time in satpos_ssr()
 *                           fix bug on wrong value with ura=15 in var_ura()
 *                           use integer types in stdint.h
+*           2021/05/21 1.15 fix typos
+*           2024/02/01 1.16 branch from ver.2.4.3b35 for MALIB
+*                           change constant MAXAGESSR 90.0 -> 60.0
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -98,7 +102,7 @@
 #define DEFURASSR 0.15            /* default accurary of ssr corr (m) */
 #define MAXECORSSR 10.0           /* max orbit correction of ssr (m) */
 #define MAXCCORSSR (1E-6*CLIGHT)  /* max clock correction of ssr (m) */
-#define MAXAGESSR 90.0            /* max age of ssr orbit and clock (s) */
+#define MAXAGESSR 60.0            /* max age of ssr orbit and clock (s) ref [11] */
 #define MAXAGESSR_HRCLK 10.0      /* max age of ssr high-rate clock (s) */
 #define STD_BRDCCLK 30.0          /* error of broadcast clock (m) */
 #define STD_GAL_NAPA 500.0        /* error of galileo ephemeris for NAPA (m) */
@@ -379,15 +383,15 @@ extern void geph2pos(gtime_t time, const geph_t *geph, double *rs, double *dts,
 *-----------------------------------------------------------------------------*/
 extern double seph2clk(gtime_t time, const seph_t *seph)
 {
-    double t;
+    double t,ts;
     int i;
     
     trace(4,"seph2clk: time=%s sat=%2d\n",time_str(time,3),seph->sat);
     
-    t=timediff(time,seph->t0);
+    t=ts=timediff(time,seph->t0);
     
     for (i=0;i<2;i++) {
-        t-=seph->af0+seph->af1*t;
+        t=ts-seph->af0+seph->af1*t;
     }
     return seph->af0+seph->af1*t;
 }
@@ -418,7 +422,7 @@ extern void seph2pos(gtime_t time, const seph_t *seph, double *rs, double *dts,
     
     *var=var_uraeph(SYS_SBS,seph->sva);
 }
-/* select ephememeris --------------------------------------------------------*/
+/* select ephemeris ----------------------------------------------------------*/
 static eph_t *seleph(gtime_t time, int sat, int iode, const nav_t *nav)
 {
     double t,tmax,tmin;
@@ -592,7 +596,7 @@ static int satpos_sbas(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
         *svh=-1;
         return 0;
     }
-    /* satellite postion and clock by broadcast ephemeris */
+    /* satellite position and clock by broadcast ephemeris */
     if (!ephpos(time,teph,sat,nav,sbs->lcorr.iode,rs,dts,var,svh)) return 0;
     
     /* sbas satellite correction (long term and fast) */
@@ -655,7 +659,7 @@ static int satpos_ssr(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
         *svh=-1;
         return 0;
     }
-    /* satellite postion and clock by broadcast ephemeris */
+    /* satellite position and clock by broadcast ephemeris */
     if (!ephpos(time,teph,sat,nav,ssr->iode,rs,dts,var,svh)) return 0;
     
     /* satellite clock for gps, galileo and qzss */

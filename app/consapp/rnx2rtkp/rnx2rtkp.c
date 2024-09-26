@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * rnx2rtkp.c : read rinex obs/nav files and compute receiver positions
 *
-*          Copyright (C) 2007-2016 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2023 by T.TAKASU, All rights reserved.
 *
 * version : $Revision: 1.1 $ $Date: 2008/07/17 21:55:16 $
 * history : 2007/01/16  1.0 new
@@ -16,6 +16,11 @@
 *           2015/05/15  1.8 -r or -l options for fixed or ppp-fixed mode
 *           2015/06/12  1.9 output patch level in header
 *           2016/09/07  1.10 add option -sys
+*           2021/01/07  1.11 add option -ver
+*           2023/01/12  1.12 fix bugs
+*           2024/02/01  1.13 branch from ver.2.4.3b35 for MALIB
+*                            add option -ign_chierr
+*           2024/08/02  1.14 change initial value of glomodear
 *-----------------------------------------------------------------------------*/
 #include <stdarg.h>
 #include "rtklib.h"
@@ -69,8 +74,10 @@ static const char *help[]={
 "           rover receiver ecef pos (m) for fixed or ppp-fixed mode",
 " -l lat lon hgt reference (base) receiver latitude/longitude/height (deg/m)",
 "           rover latitude/longitude/height for fixed or ppp-fixed mode",
+" -ign_chierr ignore chi-square error mode [off]",
 " -y level  output soltion status (0:off,1:states,2:residuals) [0]",
-" -x level  debug trace level (0:off) [0]"
+" -x level  debug trace level (0:off) [0]",
+" -ver      print version"
 };
 /* show message --------------------------------------------------------------*/
 extern int showmsg(const char *format, ...)
@@ -90,6 +97,12 @@ static void printhelp(void)
     for (i=0;i<(int)(sizeof(help)/sizeof(*help));i++) fprintf(stderr,"%s\n",help[i]);
     exit(0);
 }
+/* print version -------------------------------------------------------------*/
+static void printver(void)
+{
+    fprintf(stderr,"%s ver.%s %s\n",PROGNAME,VER_MALIB,PATCH_LEVEL_MALIB);
+    exit(0);
+}
 /* rnx2rtkp main -------------------------------------------------------------*/
 int main(int argc, char **argv)
 {
@@ -104,9 +117,9 @@ int main(int argc, char **argv)
     prcopt.mode  =PMODE_KINEMA;
     prcopt.navsys=0;
     prcopt.refpos=1;
-    prcopt.glomodear=1;
+    prcopt.glomodear=0;
     solopt.timef=0;
-    sprintf(solopt.prog ,"%s ver.%s %s",PROGNAME,VER_RTKLIB,PATCH_LEVEL);
+    sprintf(solopt.prog ,"%s ver.%s %s",PROGNAME,VER_MALIB,PATCH_LEVEL_MALIB);
     sprintf(filopt.trace,"%s.trace",PROGNAME);
     
     /* load options from configuration file */
@@ -136,12 +149,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i],"-sys")&&i+1<argc) {
             for (p=argv[++i];*p;p++) {
                 switch (*p) {
-                    case 'G': prcopt.navsys|=SYS_GPS;
-                    case 'R': prcopt.navsys|=SYS_GLO;
-                    case 'E': prcopt.navsys|=SYS_GAL;
-                    case 'J': prcopt.navsys|=SYS_QZS;
-                    case 'C': prcopt.navsys|=SYS_CMP;
-                    case 'I': prcopt.navsys|=SYS_IRN;
+                    case 'G': prcopt.navsys|=SYS_GPS; break;
+                    case 'R': prcopt.navsys|=SYS_GLO; break;
+                    case 'E': prcopt.navsys|=SYS_GAL; break;
+                    case 'J': prcopt.navsys|=SYS_QZS; break;
+                    case 'C': prcopt.navsys|=SYS_CMP; break;
+                    case 'I': prcopt.navsys|=SYS_IRN; break;
                 }
                 if (!(p=strchr(p,','))) break;
             }
@@ -172,8 +185,10 @@ int main(int argc, char **argv)
             pos2ecef(pos,prcopt.rb);
             matcpy(prcopt.ru,prcopt.rb,3,1);
         }
+        else if (!strcmp(argv[i],"-ign_chierr")) prcopt.ign_chierr = 1;
         else if (!strcmp(argv[i],"-y")&&i+1<argc) solopt.sstat=atoi(argv[++i]);
         else if (!strcmp(argv[i],"-x")&&i+1<argc) solopt.trace=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"-ver")) printver();
         else if (*argv[i]=='-') printhelp();
         else if (n<MAXFILE) infile[n++]=argv[i];
     }

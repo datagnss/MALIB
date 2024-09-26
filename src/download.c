@@ -127,7 +127,7 @@ static void remot2local(const char *remot, const char *dir, char *local)
     else if ((p=strrchr(remot,'/'))) p++;
     else p=(char *)remot;
     
-    sprintf(local,"%s%c%s",dir,FILEPATHSEP,p);
+    sprintf(local,"%.767s%c%.255s",dir,FILEPATHSEP,p);
 }
 /* test file existence -------------------------------------------------------*/
 static int exist_file(const char *local)
@@ -330,7 +330,6 @@ static int get_list(const path_t *path, const char *usr, const char *pwd,
 {
     FILE *fp;
     char cmd[4096],env[1024]="",remot[1024],*opt="",*opt2="",*p;
-    int stat;
     
 #ifndef WIN32
     opt2=" -o /dev/null";
@@ -558,12 +557,12 @@ static int test_local(gtime_t ts, gtime_t te, double ti, const char *path,
                       FILE *fp)
 {
     gtime_t time;
-    char remot[1024],remot_p[1024],dir_t[1024],local[1024],str[1024];
+    char remot[1024],dir_t[1024],local[1024],str[2050];
     int stat,abort=0;
     
     for (time=ts;timediff(time,te)<=1E-3;time=timeadd(time,ti)) {
         
-        sprintf(str,"%s->%s",path,local);
+        sprintf(str,"%.1023s->%.1023s",path,local);
         
         if (showmsg(str)) {
             abort=1;
@@ -838,7 +837,6 @@ extern void dl_test(gtime_t ts, gtime_t te, double ti, const url_t *urls,
                     int ncol, int datefmt, FILE *fp)
 {
     gtime_t time;
-    double tow;
     char year[32],date[32],date_p[32];
     int i,j,n,m,*nc,*nt,week,flag,abort=0;
     

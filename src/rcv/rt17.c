@@ -2,7 +2,7 @@
 * rt17.c : Trimble RT-17 dependent functions
 *
 *          Copyright (C) 2016 Daniel A. Cook, All rights reserved.
-*          Copyright (C) 2020 T.TAKASU, All rights reserved.
+*          Copyright (C) 2020-2021 T.TAKASU, All rights reserved.
 *
 * references:
 *     [1] https://github.com/astrodanco/RTKLIB/tree/cmr/src/rcv/rt17.c
@@ -26,6 +26,8 @@
 *           2016/07/29 1.4  suppress warning
 *           2017/04/11 1.5  (char *) -> (signed char *)
 *           2020/11/30 1.6  use integer type in stdint.h
+*           2021/01/11 1.7  remove EXPORT
+*           2021/05/21 1.8  fix typos in comments
 *-----------------------------------------------------------------------------*/
 
 /*
@@ -142,7 +144,7 @@
 | 5. Positions AKA Stream Positions
 |    (NOT RECOMMENDED)
 |
-| Streamed postions are of no use to RTKLIB. They will be ignored. RTKLIB
+| Streamed positions are of no use to RTKLIB. They will be ignored. RTKLIB
 | computes positions from the raw satellite data. It has no use for the
 | receiver's position solutions. Streamed positions also consume
 | considerable bandwidth in the stream and/or space in a file.
@@ -438,7 +440,7 @@ static void UnwrapGenout(rt17_t *rt17);
 /* Public functions (in alphabetical order): */
 
 /* free_rt17 - Free up RT17 dependent private storage */
-EXPORT void free_rt17(raw_t *Raw)
+void free_rt17(raw_t *Raw)
 {
     rt17_t *rt17 = NULL;
     
@@ -468,7 +470,7 @@ EXPORT void free_rt17(raw_t *Raw)
 }
 
 /* init_rt17 = Initialize RT17 dependent private storage */
-EXPORT int init_rt17(raw_t *Raw)
+int init_rt17(raw_t *Raw)
 {
 	rt17_t *rt17 = NULL;
     uint8_t *MessageBuffer = NULL, *PacketBuffer = NULL;
@@ -517,7 +519,7 @@ EXPORT int init_rt17(raw_t *Raw)
 | and the packet ends with a 2-byte trailer. Byte 3 is set to 0 (00h) when the packet
 | contains no data.
 */
-EXPORT int input_rt17(raw_t *Raw, uint8_t Data)
+int input_rt17(raw_t *Raw, uint8_t Data)
 {
     rt17_t *rt17 = (rt17_t*) Raw->rcv_data;
     uint8_t *MessageBuffer = rt17->MessageBuffer;
@@ -725,7 +727,7 @@ EXPORT int input_rt17(raw_t *Raw, uint8_t Data)
 |  2: input ephemeris
 |  9: input ion/utc parameter
 */
-EXPORT int input_rt17f(raw_t *Raw, FILE *fp)
+int input_rt17f(raw_t *Raw, FILE *fp)
 {
     int i, Data, Ret;
     

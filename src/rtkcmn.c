@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * rtkcmn.c : rtklib common functions
 *
-*          Copyright (C) 2007-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2021 by T.TAKASU, All rights reserved.
 *
 * options : -DLAPACK   use LAPACK/BLAS
 *           -DMKL      use Intel MKL
@@ -142,6 +142,15 @@
 *                           update obs code strings and priority table
 *                           use integer types in stdint.h
 *                           surppress warnings
+*           2021/01/09 1.46 use GLONASS extended SVH in satexclude()
+*                           update obscodes[] and codepris[][][]
+*           2021/01/11 1.47 lock(),unlock(),initlock()->
+*                             rtk_lock(),rtk_unlock(),rtk_initlock()
+*           2021/05/21 1.48 add api testelmask(), readelmask()
+*                           fix typos in comments
+*           2024/02/01 1.49 branch from ver.2.4.3b35 for MALIB
+*                           add pos2-arsys,pos2-ign_chierr
+*           2024/08/02 1.50 change initial value of glomodear,bdsmodear
 *-----------------------------------------------------------------------------*/
 #define _POSIX_C_SOURCE 199506
 #include <stdarg.h>
@@ -204,7 +213,8 @@ const double chisqr[100]={      /* chi-sqr(n) (alpha=0.001) */
 const prcopt_t prcopt_default={ /* defaults processing options */
     PMODE_SINGLE,0,2,SYS_GPS,   /* mode,soltype,nf,navsys */
     15.0*D2R,{{0,0}},           /* elmin,snrmask */
-    0,1,1,1,                    /* sateph,modear,glomodear,bdsmodear */
+    0,1,0,0,                    /* sateph,modear,glomodear,bdsmodear */
+    SYS_GPS,                    /* arsys */
     5,0,10,1,                   /* maxout,minlock,minfix,armaxiter */
     0,0,0,0,                    /* estion,esttrop,dynamics,tidecorr */
     1,0,0,0,0,                  /* niter,codesmooth,intpref,sbascorr,sbassatsel */
@@ -220,6 +230,7 @@ const prcopt_t prcopt_default={ /* defaults processing options */
     {0},{0},{0},                /* baseline,ru,rb */
     {"",""},                    /* anttype */
     {{0}},{{0}},{0}             /* antdel,pcv,exsats */
+    ,0                          /* ign_chierr */
 };
 const solopt_t solopt_default={ /* defaults solution output options */
     SOLF_LLH,TIMES_GPST,1,3,    /* posf,times,timef,timeu */
@@ -257,16 +268,17 @@ static char *obscodes[]={       /* observation code strings */
     "6A","6B","6C","6X","6Z", "6S","6L","8L","8Q","8X", /* 30-39 */
     "2I","2Q","6I","6Q","3I", "3Q","3X","1I","1Q","5A", /* 40-49 */
     "5B","5C","9A","9B","9C", "9X","1D","5D","5P","5Z", /* 50-59 */
-    "6E","7D","7P","7Z","8D", "8P","4A","4B","4X",""    /* 60-69 */
+    "6E","7D","7P","7Z","8D", "8P","4A","4B","4X","6D", /* 60-69 */
+    "6P",""                                             /* 70-   */
 };
 static char codepris[7][MAXFREQ][16]={  /* code priority for each freq-index */
    /*    0         1          2          3         4         5     */
-    {"CPYWMNSL","PYWCMNDLSX","IQX"     ,""       ,""       ,""      ,""}, /* GPS */
-    {"CPABX"   ,"PCABX"     ,"IQX"     ,""       ,""       ,""      ,""}, /* GLO */
-    {"CABXZ"   ,"IQX"       ,"IQX"     ,"ABCXZ"  ,"IQX"    ,""      ,""}, /* GAL */
-    {"CLSXZ"   ,"LSX"       ,"IQXDPZ"  ,"LSXEZ"  ,""       ,""      ,""}, /* QZS */
+    {"C"       ,"PYWCMNDLXS","QXI"     ,""       ,""       ,""      ,""}, /* GPS */
+    {"CP"      ,"PC"        ,"QXI"     ,""       ,""       ,""      ,""}, /* GLO */
+    {"CBX"     ,"QXI"       ,"QXI"     ,"CXB"    ,"QXI"    ,""      ,""}, /* GAL */
+    {"CLXS"    ,"LXS"       ,"QXI"     ,"SEZ"    ,""       ,""      ,""}, /* QZS */
     {"C"       ,"IQX"       ,""        ,""       ,""       ,""      ,""}, /* SBS */
-    {"IQXDPAN" ,"IQXDPZ"    ,"DPX"     ,"IQXA"   ,"DPX"    ,""      ,""}, /* BDS */
+    {"IQDPXSLZ","IQXDPZ"    ,"DPX"     ,"IQXDPZ" ,"DPX"    ,""      ,""}, /* BDS */
     {"ABCX"    ,"ABCX"      ,""        ,""       ,""       ,""      ,""}  /* IRN */
 };
 static fatalfunc_t *fatalfunc=NULL; /* fatal callback function */
@@ -533,7 +545,14 @@ extern int satexclude(int sat, double var, int svh, const prcopt_t *opt)
         if (!(sys&opt->navsys)) return 1; /* unselected sat sys */
     }
     if (sys==SYS_QZS) svh&=0xFE; /* mask QZSS LEX health */
-    if (svh) {
+    
+    if (sys==SYS_GLO) {
+        if ((svh&9)||((svh>>1)&3)==2) { /* test Bn and extended SVH */
+            trace(3,"unhealthy GLO satellite: sat=%3d svh=%02X\n",sat,svh);
+            return 1;
+        }
+    }
+    else if (svh) {
         trace(3,"unhealthy satellite: sat=%3d svh=%02X\n",sat,svh);
         return 1;
     }
@@ -568,6 +587,21 @@ extern int testsnr(int base, int idx, double el, double snr,
     
     return snr<minsnr;
 }
+/* test elevation mask ---------------------------------------------------------
+* test elevation mask
+* args   : double *azel     I   azimuth/elevation angle {az,el} (rad)
+*          int16_t *elmask  I   elevation mask vector (360 x 1) (0.1 deg)
+*                                 elmask[i]: elevation mask at azimuth i (deg)
+* return : status (1:masked,0:unmasked)
+*-----------------------------------------------------------------------------*/
+extern int testelmask(const double *azel, const int16_t *elmask)
+{
+    double az=azel[0]*R2D;
+    
+    az-=floor(az/360.0)*360.0; /* 0 <= az < 360.0 */
+    
+    return azel[1]*R2D<elmask[(int)floor(az)]*0.1;
+}
 /* obs type string to obs code -------------------------------------------------
 * convert obs code type string to obs code
 * args   : char   *str      I   obs code string ("1C","1P","1Y",...)
@@ -588,7 +622,7 @@ extern uint8_t obs2code(const char *obs)
 * convert obs code to obs code string
 * args   : uint8_t code     I   obs code (CODE_???)
 * return : obs code string ("1C","1P","1P",...)
-* notes  : obs codes are based on RINEX 3.04
+* notes  : obs codes are based on RINEX 3.05
 *-----------------------------------------------------------------------------*/
 extern char *code2obs(uint8_t code)
 {
@@ -633,7 +667,7 @@ static int code2freq_GAL(uint8_t code, double *freq)
         case '7': *freq=FREQ7; return 1; /* E5b */
         case '5': *freq=FREQ5; return 2; /* E5a */
         case '6': *freq=FREQ6; return 3; /* E6 */
-        case '8': *freq=FREQ8; return 4; /* E5ab */
+        case '8': *freq=FREQ8; return 4; /* E5a+b */
     }
     return -1;
 }
@@ -667,12 +701,12 @@ static int code2freq_BDS(uint8_t code, double *freq)
     char *obs=code2obs(code);
     
     switch (obs[0]) {
-        case '1': *freq=FREQ1;     return 0; /* B1C */
-        case '2': *freq=FREQ1_CMP; return 0; /* B1I */
-        case '7': *freq=FREQ2_CMP; return 1; /* B2I/B2b */
+        case '1': *freq=FREQ1;     return 0; /* B1C/B1A */
+        case '2': *freq=FREQ1_CMP; return 0; /* B1 */
+        case '7': *freq=FREQ2_CMP; return 1; /* B2/B2b */
         case '5': *freq=FREQ5;     return 2; /* B2a */
-        case '6': *freq=FREQ3_CMP; return 3; /* B3 */
-        case '8': *freq=FREQ8;     return 4; /* B2ab */
+        case '6': *freq=FREQ3_CMP; return 3; /* B3/B3A */
+        case '8': *freq=FREQ8;     return 4; /* B2a+b */
     }
     return -1;
 }
@@ -692,15 +726,16 @@ static int code2freq_IRN(uint8_t code, double *freq)
 * args   : int    sys       I   satellite system (SYS_???)
 *          uint8_t code     I   obs code (CODE_???)
 * return : frequency index (-1: error)
-*                       0     1     2     3     4 
-*           --------------------------------------
-*            GPS       L1    L2    L5     -     - 
-*            GLONASS   G1    G2    G3     -     -  (G1=G1,G1a,G2=G2,G2a)
-*            Galileo   E1    E5b   E5a   E6   E5ab
-*            QZSS      L1    L2    L5    L6     - 
-*            SBAS      L1     -    L5     -     -
-*            BDS       B1    B2    B2a   B3   B2ab (B1=B1I,B1C,B2=B2I,B2b)
-*            NavIC     L5     S     -     -     - 
+*            freq-index    0        1        2        3        4 
+*            Signal ID    L1       L2       L3       L4       L5
+*            -----------------------------------------------------
+*            GPS          L1       L2       L5        -        - 
+*            GLONASS    G1/G1a   G2/G2a     G3        -        -
+*            Galileo      E1       E5b     E5a       E6      E5a+b
+*            QZSS         L1       L2       L5       L6        - 
+*            SBAS         L1       L5       -         -        -
+*            BDS      B1/B1C/B1A B2/B2b    B2a     B3/B3A    B2a+b
+*            NavIC        L5        S       -         -        - 
 *-----------------------------------------------------------------------------*/
 extern int code2idx(int sys, uint8_t code)
 {
@@ -1919,7 +1954,7 @@ extern double dms2deg(const double *dms)
     double sign=dms[0]<0.0?-1.0:1.0;
     return sign*(fabs(dms[0])+dms[1]/60.0+dms[2]/3600.0);
 }
-/* transform ecef to geodetic postion ------------------------------------------
+/* transform ecef to geodetic position -----------------------------------------
 * transform ecef position to geodetic position
 * args   : double *r        I   ecef position {x,y,z} (m)
 *          double *pos      O   geodetic position {lat,lon,h} (rad,m)
@@ -2312,7 +2347,7 @@ static int readngspcv(const char *file, pcvs_t *pcvs)
         if (buff[0]!=' ') n=0; /* start line */
         if (++n==1) {
             pcv=pcv0;
-            strncpy(pcv.type,buff,61); pcv.type[61]='\0';
+            sprintf(pcv.type,"%.61s",buff);
         }
         else if (n==2) {
             if (decodef(buff,3,neu)<3) continue;
@@ -2495,6 +2530,51 @@ extern pcv_t *searchpcv(int sat, const char *type, gtime_t time,
         }
     }
     return NULL;
+}
+/* read elevation mask file ----------------------------------------------------
+* read elevation mask file
+* args   : char   *file     I   elevation mask file
+*          int16_t *elmask  O   elevation mask vector (360 x 1) (0.1 deg)
+*                                 elmask[i]: elevation mask at azimuth i (deg)
+* return : status (1:ok,0:file open error)
+* notes  : text format of the elevation mask file
+*            AZ1  EL1
+*            AZ2  EL2
+*            ...
+*          (1) EL{i} defines the elevation mask (deg) at the azimuth angle az
+*              (AZ{i} <= az (deg) < AZ{i+1}, AZ1 < AZ2 < ... < AZ{n}, n <= 360)
+*          (2) text after % or # is treated as comments
+*-----------------------------------------------------------------------------*/
+extern int readelmask(const char *file, int16_t *elmask)
+{
+    FILE *fp;
+    double az[360],el[360],mask=0.0;
+    char buff[256],*p;
+    int i,j=0,n=0;
+    
+    trace(3,"readelmask: file=%s\n",file);
+    
+    for (i=0;i<360;i++) {
+        elmask[i]=0;
+    }
+    if (!(fp=fopen(file,"r"))) {
+        fprintf(stderr,"elevation mask file open error : %s\n",file);
+        return 0;
+    }
+    while (fgets(buff,sizeof(buff),fp)&&n<360) {
+        if ((p=strchr(buff,'%'))) *p='\0';
+        if ((p=strchr(buff,'#'))) *p='\0';
+        if (sscanf(buff,"%lf %lf",az+n,el+n)==2) n++;
+    }
+    fclose(fp);
+    
+    for (i=0;i<360;i++) {
+        if (j<n&&i>=(int)az[j]) {
+            mask=el[j++];
+        }
+        elmask[i]=(int16_t)(mask/0.1);
+    }
+    return 1;
 }
 /* read station positions ------------------------------------------------------
 * read positions from station position file
@@ -2706,7 +2786,8 @@ static void uniqeph(nav_t *nav)
     
     for (i=1,j=0;i<nav->n;i++) {
         if (nav->eph[i].sat!=nav->eph[j].sat||
-            nav->eph[i].iode!=nav->eph[j].iode) {
+            nav->eph[i].iode!=nav->eph[j].iode||
+            nav->eph[i].type!=nav->eph[j].type) {
             nav->eph[++j]=nav->eph[i];
         }
     }
@@ -3027,24 +3108,24 @@ static char file_trace[1024];   /* trace file */
 static int level_trace=0;       /* level of trace */
 static uint32_t tick_trace=0;   /* tick time at traceopen (ms) */
 static gtime_t time_trace={0};  /* time at traceopen */
-static lock_t lock_trace;       /* lock for trace */
+static rtk_lock_t lock_trace;   /* lock for trace */
 
 static void traceswap(void)
 {
     gtime_t time=utc2gpst(timeget());
     char path[1024];
     
-    lock(&lock_trace);
+    rtk_lock(&lock_trace);
     
     if ((int)(time2gpst(time      ,NULL)/INT_SWAP_TRAC)==
         (int)(time2gpst(time_trace,NULL)/INT_SWAP_TRAC)) {
-        unlock(&lock_trace);
+        rtk_unlock(&lock_trace);
         return;
     }
     time_trace=time;
     
     if (!reppath(file_trace,path,time,"","")) {
-        unlock(&lock_trace);
+        rtk_unlock(&lock_trace);
         return;
     }
     if (fp_trace) fclose(fp_trace);
@@ -3052,7 +3133,7 @@ static void traceswap(void)
     if (!(fp_trace=fopen(path,"w"))) {
         fp_trace=stderr;
     }
-    unlock(&lock_trace);
+    rtk_unlock(&lock_trace);
 }
 extern void traceopen(const char *file)
 {
@@ -3064,7 +3145,7 @@ extern void traceopen(const char *file)
     strcpy(file_trace,file);
     tick_trace=tickget();
     time_trace=time;
-    initlock(&lock_trace);
+    rtk_initlock(&lock_trace);
 }
 extern void traceclose(void)
 {
@@ -3941,7 +4022,7 @@ extern void sunmoonpos(gtime_t tutc, const double *erpv, double *rsun,
     /* eci to ecef transformation matrix */
     eci2ecef(tutc,erpv,U,&gmst_);
     
-    /* sun and moon postion in ecef */
+    /* sun and moon position in ecef */
     if (rsun ) matmul("NN",3,1,3,1.0,U,rs,0.0,rsun );
     if (rmoon) matmul("NN",3,1,3,1.0,U,rm,0.0,rmoon);
     if (gmst ) *gmst=gmst_;

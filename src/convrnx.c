@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * convrnx.c : rinex translator for rtcm and receiver raw data log
 *
-*          Copyright (C) 2009-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2009-2021 by T.TAKASU, All rights reserved.
 *
 * version : $Revision: 1.2 $ $Date: 2008/07/17 21:48:06 $
 * history : 2009/04/10 1.0  new
@@ -43,6 +43,10 @@
 *                           fix bug on screening time in screent_ttol()
 *                           fix bug on screening QZS L1S messages as SBAS
 *                           use integer types in stdint.h
+*           2021/01/07 1.16 support RINEX 3.05
+*                           fix bug on insufficient initialization of obs data
+*                             buffer at the second pass start of convertion
+*                           fix bug on dropping nav data if time start specified
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -93,16 +97,16 @@ static const int navsys[]={     /* system codes */
     SYS_GPS,SYS_GLO,SYS_GAL,SYS_QZS,SYS_SBS,SYS_CMP,SYS_IRN,0
 };
 static const char vercode[][MAXCODE]={ /* supported obs-type by RINEX version */
-  /* 0........1.........2.........3.........4.........5.........6........          */
-  /* 11111111111112222222222555777666666688822663331155599991555677788444     CODE */
-  /* CPWYMNSLEABXZCDSLXPWYMNIQXIQXABCXZSLIQXIQIQIQXIQABCABCXDDPZEDPZDPABX          */
-    "00000000...0.0000000000000..........................................", /* GPS */
-    "00...........0....0..........44.4..........222...................444", /* GLO */
-    "0........0000..........0000000000...000.............................", /* GAL */
-    "2.....22...22..222.....222......2422....................4444........", /* QZS */
-    "0......................000..........................................", /* SBS */
-    ".4...4...4.4.....1.......41114..1.....41111............444..44444...", /* BDS */
-    ".........................3......................3333333............."  /* IRN */
+  /* 0........1.........2.........3.........4.........5.........6.........7      */
+  /* 1111111111111222222222255577766666668882266333115559999155567778844466 CODE */
+  /* CPWYMNSLEABXZCDSLXPWYMNIQXIQXABCXZSLIQXIQIQIQXIQABCABCXDDPZEDPZDPABXDP      */
+    "00000000...0.0000000000000............................................", /* GPS */
+    "00...........0....0..........44.4..........222...................444..", /* GLO */
+    "0........0000..........0000000000...000...............................", /* GAL */
+    "2.....22..522..222.....222......2422....................4444..........", /* QZS */
+    "0......................000............................................", /* SBS */
+    ".4...455.4.45....1.......41114..15....41111............444..44444...55", /* BDS */
+    ".........................3......................3333333..............."  /* IRN */
 };
 /* convert RINEX obs-type ver.3 -> ver.2 -------------------------------------*/
 static void convcode(int rnxver, int sys, char *type)
@@ -447,7 +451,10 @@ static void setopt_phshift(rnxopt_t *opt)
             }
         }
         else if (navsys[i]==SYS_GLO) {
-            if (code==CODE_L1P||code==CODE_L2P||code==CODE_L3Q) {
+            if (code==CODE_L1P||code==CODE_L2P) {
+                opt->shift[i][j]=0.25; /* +1/4 cyc */
+            }
+            else if (opt->rnxver==304&&code==CODE_L3Q) {
                 opt->shift[i][j]=0.25; /* +1/4 cyc */
             }
         }
@@ -471,10 +478,14 @@ static void setopt_phshift(rnxopt_t *opt)
             }
         }
         else if (navsys[i]==SYS_CMP) {
-            if (code==CODE_L2P||code==CODE_L7Q||code==CODE_L6Q) {
+            if (code==CODE_L7Q) {
                 opt->shift[i][j]=-0.25; /* -1/4 cyc */
             }
-            else if (code==CODE_L1P||code==CODE_L5P||code==CODE_L7P) {
+            else if (opt->rnxver==304&&(code==CODE_L2Q||code==CODE_L6Q)) {
+                opt->shift[i][j]=-0.25; /* -1/4 cyc */
+            }
+            else if (opt->rnxver==304&&
+                     (code==CODE_L1P||code==CODE_L5P||code==CODE_L7P)) {
                 opt->shift[i][j]=0.25; /* +1/4 cyc */
             }
         }
@@ -599,7 +610,7 @@ static void update_stainf(strfile_t *str)
 /* dump station list ---------------------------------------------------------*/
 static void dump_stas(const strfile_t *str)
 {
-#if 1 /* for debug */
+#if 0 /* for debug */
     stas_t *p;
     double pos[3];
     char s1[32],s2[32];
@@ -894,7 +905,7 @@ static void outrnxevent(FILE *fp, const rnxopt_t *opt, gtime_t time, int event,
                         const stas_t *stas, int staid)
 {
     const stas_t *p=NULL,*q;
-    double ep[6],pos[3],enu[3],del[3];
+    double ep[6],pos[3],enu[3],del[3]={0};
 
     trace(3,"outrnxevent: event=%d\n",event);
     
@@ -1184,7 +1195,8 @@ static void setopt_apppos(strfile_t *str, rnxopt_t *opt)
     sol_t sol={{0}};
     char msg[128];
     
-    prcopt.navsys=opt->navsys;
+    prcopt.navsys=opt->navsys&(SYS_GPS|SYS_GLO|SYS_GAL|SYS_QZS);
+    prcopt.maxgdop=5.0;
     
     /* point positioning with last obs data */
     if (!pntpos(str->obs->data,str->obs->n,str->nav,&prcopt,&sol,NULL,NULL,
@@ -1226,8 +1238,8 @@ static int convrnx_s(int sess, int format, rnxopt_t *opt, const char *file,
 {
     FILE *ofp[NOUTFILE]={NULL};
     strfile_t *str;
-    gtime_t tend[3]={{0}};
-    int i,j,nf,type,n[NOUTFILE+1]={0},mask[MAXEXFILE]={0},staid=-1,abort=0;
+    gtime_t tend[3]={{0}},time0={0};
+    int i,j,k,nf,type,n[NOUTFILE+1]={0},mask[MAXEXFILE]={0},staid=-1,abort=0;
     char path[1024],*paths[NOUTFILE],s[NOUTFILE][1024];
     char *epath[MAXEXFILE]={0},*staname=*opt->staid?opt->staid:"0000";
     
@@ -1291,8 +1303,20 @@ static int convrnx_s(int sess, int format, rnxopt_t *opt, const char *file,
         free_strfile(str);
         return 0;
     }
-    str->time=str->tstart;
+    /* initialize stream time and obs data buffer */
+    str->time=str->tstart=str->obs->data[0].time=time0;
+    str->obs->n=0;
     
+    /* initialize IODE in nav data buffer */
+    for (i=0;i<str->nav->n ;i++) str->nav->eph [i].iode=-1;
+    for (i=0;i<str->nav->ng;i++) str->nav->geph[i].iode=-1;
+    
+    if (format==STRFMT_RTCM2||format==STRFMT_RTCM3||format==STRFMT_RT17) {
+        str->time=opt->trtcm;
+    }
+    else if (opt->ts.time) {
+        str->time=timeadd(opt->ts,-1.0);
+    }
     for (i=0;i<nf&&!abort;i++) {
         if (!mask[i]) continue;
         
@@ -1304,7 +1328,14 @@ static int convrnx_s(int sess, int format, rnxopt_t *opt, const char *file,
             
             if (!(j%11)&&(abort=showstat(sess,str->time,str->time,n))) break;
             
-            if (opt->ts.time&&timediff(str->time,opt->ts)<-opt->ttol) continue;
+            if (opt->ts.time&&timediff(str->time,opt->ts)<-opt->ttol) {
+                
+                if (type==2) { /* initialize IODE in nav data buffer */
+                    for (k=0;k<str->nav->n ;k++) str->nav->eph [k].iode=-1;
+                    for (k=0;k<str->nav->ng;k++) str->nav->geph[k].iode=-1;
+                }
+                continue;
+            }
             if (opt->te.time&&timediff(str->time,opt->te)>-opt->ttol) break;
             
             /* convert message */

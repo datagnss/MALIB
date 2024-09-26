@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * rtkrcv.c : rtk-gps/gnss receiver console ap
 *
-*          Copyright (C) 2009-2015 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2009-2021 by T.TAKASU, All rights reserved.
 *
 * notes   :
 *     current version does not support win32 without pthread library
@@ -35,6 +35,11 @@
 *           2016/09/19 1.20 support multiple remote console connections
 *                           add option -w
 *           2017/09/01 1.21 add command ssr
+*           2021/01/19 1.22 add option -v and -ver
+*                      1.23 update option string ISTOPT,OSTOPT,FMTOPT
+*           2024/02/01 1.24 branch from ver.2.4.3b35 for MALIB
+*                           add option -rst
+*           2024/08/02 1.25 fix bug confwrite() con_close()
 *-----------------------------------------------------------------------------*/
 #include <stdlib.h>
 #include <signal.h>
@@ -122,6 +127,7 @@ static char sta_name[256]="";           /* station name */
 static prcopt_t prcopt;                 /* processing options */
 static solopt_t solopt[2]={{0}};        /* solution options */
 static filopt_t filopt  ={""};          /* file options */
+gtime_t rst = {0};                      /* raw/rtcm data start time */
 
 /* help text -----------------------------------------------------------------*/
 static const char *usage[]={
@@ -135,7 +141,9 @@ static const char *usage[]={
     "  -w pwd     login password for remote console (\"\": no password)",
     "  -r level   output solution status file (0:off,1:states,2:residuals)",
     "  -t level   debug trace level (0:off,1-5:on)",
-    "  -sta sta   station name for receiver dcb"
+    "  -sta sta   station name for receiver dcb",
+    "  -v|-ver    print version",
+    "  -rst ds ts start day/time (ds=y/m/d ts=h:m:s) [raw/rtcm data start time]"
 };
 static const char *helptxt[]={
     "start                 : start rtk server",
@@ -162,25 +170,29 @@ static const char *helptxt[]={
 };
 static const char *pathopts[]={         /* path options help */
     "stream path formats",
-    "serial   : port[:bit_rate[:byte[:parity(n|o|e)[:stopb[:fctr(off|on)]]]]]",
+    "serial   : port[:bit_rate[:byte[:parity(n|o|e)[:stopb[:fctr(off|on)]]]]][#port*1]",
     "file     : path[::T[::+offset][::xspeed]]",
     "tcpsvr   : :port",
     "tcpcli   : addr:port",
-    "ntripsvr : user:passwd@addr:port/mntpnt[:str]",
-    "ntripcli : user:passwd@addr:port/mntpnt",
-    "ntripc_s : :passwd@:port",
-    "ntripc_c : user:passwd@:port",
+    "ntripsvr : :passwd@addr:port/mntpnt[:str*2]",
+    "ntripcli : [user[:passwd]]@addr:port/mntpnt",
+    "ntripcas : [user[:passwd]]@:port/mntpnt[:str*2]",
     "ftp      : user:passwd@addr/path[::T=poff,tint,off,rint]",
     "http     : addr/path[::T=poff,tint,off,rint]",
+    "udpsvr   : :port",
+    "udpcli   : addr:port",
+    "",
+    " *1: tcp server port to output return data via the serial stream",
+    " *2: string for source entry in ntrip sourcetable separated by :",
     ""
 };
 /* receiver options table ----------------------------------------------------*/
 #define TIMOPT  "0:gpst,1:utc,2:jst,3:tow"
 #define CONOPT  "0:dms,1:deg,2:xyz,3:enu,4:pyl"
 #define FLGOPT  "0:off,1:std+2:age/ratio/ns"
-#define ISTOPT  "0:off,1:serial,2:file,3:tcpsvr,4:tcpcli,7:ntripcli,8:ftp,9:http"
-#define OSTOPT  "0:off,1:serial,2:file,3:tcpsvr,4:tcpcli,6:ntripsvr,11:ntripc_c"
-#define FMTOPT  "0:rtcm2,1:rtcm3,2:oem4,3:oem3,4:ubx,5:ss2,6:hemis,7:skytraq,8:gw10,9:javad,10:nvs,11:binex,12:rt17,13:sbf,14:cmr,15:tersus,18:sp3"
+#define ISTOPT  "0:off,1:serial,2:file,3:tcpsvr,4:tcpcli,6:ntripcli,7:ftp,8:http,10:udpsvr,11:udpcli"
+#define OSTOPT  "0:off,1:serial,2:file,3:tcpsvr,4:tcpcli,5:ntripsvr,9:ntripcas,10:udpsvr,11:udpcli"
+#define FMTOPT  "0:rtcm2,1:rtcm3,2:oem4,3:oem3,4:ubx,5:ss2,6:hemis,7:skytraq,8:javad,9:nvs,10:binex,11:rt17,12:sbf,14:sp3,21:l6e"
 #define NMEOPT  "0:off,1:latlon,2:single"
 #define SOLOPT  "0:llh,1:xyz,2:enu,3:nmea,4:stat"
 #define MSGOPT  "0:all,1:rover,2:base,3:corr"
@@ -244,6 +256,12 @@ static void printusage(void)
     }
     exit(0);
 }
+/* print version -------------------------------------------------------------*/
+static void printver(void)
+{
+    fprintf(stderr,"%s %s %s\n",PRGNAME,VER_MALIB,PATCH_LEVEL_MALIB);
+    exit(0);
+}
 /* external stop signal ------------------------------------------------------*/
 static void sigshut(int sig)
 {
@@ -303,7 +321,16 @@ static int confwrite(vt_t *vt, const char *file)
 {
     FILE *fp;
     char buff[MAXSTR],*p;
-    
+
+    /* Check if vt is NULL */
+    if (vt == NULL) {
+        fprintf(stderr,"Error: vt is NULL\n");
+        return 1;
+    }
+    if (!vt->state) {
+        fprintf(stderr,"Error: vt->state is invalid\n");
+        return 1;
+    }
     strcpy(buff,file);
     if ((p=strstr(buff,"::"))) *p='\0'; /* omit options in path */
     if (!vt->state||!(fp=fopen(buff,"r"))) return 1; /* no existing file */
@@ -472,7 +499,7 @@ static int startsvr(vt_t *vt)
     /* start rtk server */
     if (!rtksvrstart(&svr,svrcycle,buffsize,strtype,paths,strfmt,navmsgsel,
                      cmds,cmds_periodic,ropts,nmeacycle,nmeareq,npos,&prcopt,
-                     solopt,&moni,errmsg)) {
+                     solopt,&moni,rst,errmsg)) {
         trace(2,"rtk server start error (%s)\n",errmsg);
         vt_printf(vt,"rtk server start error (%s)\n",errmsg);
         return 0;
@@ -632,7 +659,7 @@ static void prstatus(vt_t *vt)
          "single","DGPS","kinematic","static","moving-base","fixed",
          "PPP-kinema","PPP-static"
     };
-    const char *freq[]={"-","L1","L1+L2","L1+L2+L5","","",""};
+    const char *freq[]={"-","L1","L1+L2","L1+L2+L3","L1+L2+L3+L4","L1+L2+L3+L4+L5",""};
     rtcm_t rtcm[3];
     int i,j,n,thread,cycle,state,rtkstat,nsat0,nsat1,prcout,nave;
     int cputime,nb[3]={0},nmsg[3][10]={{0}};
@@ -675,7 +702,7 @@ static void prstatus(vt_t *vt)
     dops(n,azel,0.0,dop);
     
     vt_printf(vt,"\n%s%-28s: %s%s\n",ESC_BOLD,"Parameter","Value",ESC_RESET);
-    vt_printf(vt,"%-28s: %s %s\n","rtklib version",VER_RTKLIB,PATCH_LEVEL);
+    vt_printf(vt,"%-28s: %s %s\n","malib version",VER_MALIB,PATCH_LEVEL_MALIB);
     vt_printf(vt,"%-28s: %d\n","rtk server thread",thread);
     vt_printf(vt,"%-28s: %s\n","rtk server state",svrstate[state]);
     vt_printf(vt,"%-28s: %d\n","processing cycle (ms)",cycle);
@@ -766,7 +793,7 @@ static void prstatus(vt_t *vt)
     vt_printf(vt,"%-28s: %d\n","monitor port",moniport);
 }
 /* print satellite -----------------------------------------------------------*/
-static void prsatellite(vt_t *vt, int nf)
+static void prsatellite(vt_t *vt, int sys, int nf)
 {
     rtk_t rtk;
     double az,el;
@@ -790,7 +817,7 @@ static void prsatellite(vt_t *vt, int nf)
     vt_printf(vt,"%s\n",ESC_RESET);
     
     for (i=0;i<MAXSAT;i++) {
-        if (rtk.ssat[i].azel[1]<=0.0) continue;
+        if (rtk.ssat[i].azel[1]<=0.0||!(satsys(i+1,NULL)&sys)) continue;
         satno2id(i+1,id);
         vt_printf(vt,"%3s %2s",id,rtk.ssat[i].vs?"OK":"-");
         az=rtk.ssat[i].azel[0]*R2D; if (az<0.0) az+=360.0;
@@ -810,46 +837,51 @@ static void prsatellite(vt_t *vt, int nf)
     }
 }
 /* print observation data ----------------------------------------------------*/
-static void probserv(vt_t *vt, int nf)
+static void probserv(vt_t *vt, int sys, int nf)
 {
     obsd_t obs[MAXOBS*2];
     char tstr[64],id[32];
-    int i,j,n=0,frq[]={1,2,5,7,8,6,9};
+    int i,j,n=0;
     
     trace(4,"probserv:\n");
     
     rtksvrlock(&svr);
     for (i=0;i<svr.obs[0][0].n&&n<MAXOBS*2;i++) {
+        if (!(satsys(svr.obs[0][0].data[i].sat,NULL)&sys)) continue;
         obs[n++]=svr.obs[0][0].data[i];
     }
     for (i=0;i<svr.obs[1][0].n&&n<MAXOBS*2;i++) {
+        if (!(satsys(svr.obs[1][0].data[i].sat,NULL)&sys)) continue;
         obs[n++]=svr.obs[1][0].data[i];
     }
     rtksvrunlock(&svr);
     
     if (nf<=0||nf>NFREQ) nf=NFREQ;
     vt_printf(vt,"\n%s%-22s %3s %s",ESC_BOLD,"      TIME(GPST)","SAT","R");
-    for (i=0;i<nf;i++) vt_printf(vt,"        P%d(m)" ,frq[i]);
-    for (i=0;i<nf;i++) vt_printf(vt,"       L%d(cyc)",frq[i]);
-    for (i=0;i<nf;i++) vt_printf(vt,"  D%d(Hz)"      ,frq[i]);
-    for (i=0;i<nf;i++) vt_printf(vt," S%d"           ,frq[i]);
+    for (i=0;i<nf;i++) vt_printf(vt," C%d"           ,i+1);
+    for (i=0;i<nf;i++) vt_printf(vt," S%d"           ,i+1);
+    for (i=0;i<nf;i++) vt_printf(vt,"        P%d(m)" ,i+1);
+    for (i=0;i<nf;i++) vt_printf(vt,"       L%d(cyc)",i+1);
+    for (i=0;i<nf;i++) vt_printf(vt,"  D%d(Hz)"      ,i+1);
     vt_printf(vt," LLI%s\n",ESC_RESET);
     for (i=0;i<n;i++) {
         time2str(obs[i].time,tstr,2);
         satno2id(obs[i].sat,id);
         vt_printf(vt,"%s %3s %d",tstr,id,obs[i].rcv);
+        for (j=0;j<nf;j++) vt_printf(vt,"%3s"   ,code2obs(obs[i].code[j]));
+        for (j=0;j<nf;j++) vt_printf(vt,"%3.0f" ,obs[i].SNR[j]*SNR_UNIT);
         for (j=0;j<nf;j++) vt_printf(vt,"%13.3f",obs[i].P[j]);
         for (j=0;j<nf;j++) vt_printf(vt,"%14.3f",obs[i].L[j]);
         for (j=0;j<nf;j++) vt_printf(vt,"%8.1f" ,obs[i].D[j]);
-        for (j=0;j<nf;j++) vt_printf(vt,"%3.0f" ,obs[i].SNR[j]*SNR_UNIT);
-        for (j=0;j<nf;j++) vt_printf(vt,"%2d"   ,obs[i].LLI[j]);
+        vt_printf(vt," ");
+        for (j=0;j<nf;j++) vt_printf(vt,"%1X"   ,obs[i].LLI[j]);
         vt_printf(vt,"\n");
     }
 }
 /* print navigation data -----------------------------------------------------*/
-static void prnavidata(vt_t *vt)
+static void prnavidata(vt_t *vt, int sys)
 {
-    eph_t eph[MAXSAT];
+    eph_t eph[MAXSAT*2];
     geph_t geph[MAXPRNGLO];
     double ion[8],utc[8];
     gtime_t time;
@@ -860,7 +892,7 @@ static void prnavidata(vt_t *vt)
     
     rtksvrlock(&svr);
     time=svr.rtk.sol.time;
-    for (i=0;i<MAXSAT;i++) eph[i]=svr.nav.eph[i];
+    for (i=0;i<MAXSAT*2;i++) eph[i]=svr.nav.eph[i];
     for (i=0;i<MAXPRNGLO;i++) geph[i]=svr.nav.geph[i];
     for (i=0;i<8;i++) ion[i]=svr.nav.ion_gps[i];
     for (i=0;i<8;i++) utc[i]=svr.nav.utc_gps[i];
@@ -869,9 +901,8 @@ static void prnavidata(vt_t *vt)
     vt_printf(vt,"\n%s%3s %3s %3s %3s %3s %3s %3s %19s %19s %19s %3s %3s%s\n",
               ESC_BOLD,"SAT","S","IOD","IOC","FRQ","A/A","SVH","Toe","Toc",
               "Ttr/Tof","L2C","L2P",ESC_RESET);
-    for (i=0;i<MAXSAT;i++) {
-        if (!(satsys(i+1,&prn)&(SYS_GPS|SYS_GAL|SYS_QZS|SYS_CMP))||
-            eph[i].sat!=i+1) continue;
+    for (i=0;i<MAXSAT*2;i++) {
+        if (!(satsys(i+1,NULL)&sys)||eph[i].sat!=(i+1)%MAXSAT) continue;
         valid=eph[i].toe.time!=0&&!eph[i].svh&&
               fabs(timediff(time,eph[i].toe))<=MAXDTOE;
         satno2id(i+1,id);
@@ -883,7 +914,7 @@ static void prnavidata(vt_t *vt)
                 eph[i].svh,s1,s2,s3,eph[i].code,eph[i].flag);
     }
     for (i=0;i<MAXSAT;i++) {
-        if (!(satsys(i+1,&prn)&SYS_GLO)||geph[prn-1].sat!=i+1) continue;
+        if (!(satsys(i+1,&prn)&SYS_GLO&sys)||geph[prn-1].sat!=i+1) continue;
         valid=geph[prn-1].toe.time!=0&&!geph[prn-1].svh&&
               fabs(timediff(time,geph[prn-1].toe))<=MAXDTOE_GLO;
         satno2id(i+1,id);
@@ -921,11 +952,13 @@ static void prstream(vt_t *vt)
         "log rover","log base","log corr","monitor"
     };
     const char *type[]={
-        "-","serial","file","tcpsvr","tcpcli","udp","ntrips","ntripc","ftp",
-        "http","ntripc_s","ntripc_c"
+        "-","serial","file","tcpsvr","tcpcli","ntripsvr","ntripcli","ftp",
+        "http","ntripcas","udpsvr","udpcli",""
     };
-    const char *fmt[]={"rtcm2","rtcm3","oem4","oem3","ubx","ss2","hemis","skytreq",
-                       "gw10","javad","nvs","binex","rt17","sbf","cmr","","","sp3",""};
+    const char *fmt[]={
+        "rtcm2","rtcm3","oem4","oem3","ubx","ss2","hemis","skytreq","javad",
+        "nvs","binex","rt17","sbf","","sp3","","","","","","stat","l6e"
+    };
     const char *sol[]={"llh","xyz","enu","nmea","stat","-"};
     stream_t stream[9];
     int i,format[9]={0};
@@ -985,6 +1018,20 @@ static void prssr(vt_t *vt)
                    ssr[i].hrclk);
     }
     vt_puts(vt,buff);
+}
+/* parse system option -------------------------------------------------------*/
+static int parse_sysopt(const char *arg)
+{
+    const int syss[]={SYS_GPS,SYS_GLO,SYS_GAL,SYS_QZS,SYS_CMP,SYS_IRN,SYS_SBS};
+    const char *sys_str="GREJCIS",*p;
+    int i,sys=0;
+
+    if (arg[0]!='-') return 0;
+    
+    for (i=1;arg[i];i++) {
+        if ((p=strchr(sys_str,arg[i]))) sys|=syss[(int)(p-sys_str)];
+    }
+    return sys;
 }
 /* start command -------------------------------------------------------------*/
 static void cmd_start(char **args, int narg, vt_t *vt)
@@ -1049,16 +1096,18 @@ static void cmd_status(char **args, int narg, vt_t *vt)
 /* satellite command ---------------------------------------------------------*/
 static void cmd_satellite(char **args, int narg, vt_t *vt)
 {
-    int i,nf=2,cycle=0;
+    int i,n,s,nf=2,sys=SYS_ALL,cycle=0;
     
     trace(3,"cmd_satellite:\n");
     
     for (i=1;i<narg;i++) {
-        if (sscanf(args[i],"-%d",&nf)<1) cycle=(int)(atof(args[i])*1000.0);
+        if (sscanf(args[i],"-%d",&n)==1) nf=n;
+        else if ((s=parse_sysopt(args[i]))) sys=s;
+        else cycle=(int)(atof(args[i])*1000.0);
     }
     while (!vt_chkbrk(vt)) {
         if (cycle>0) vt_printf(vt,ESC_CLEAR);
-        prsatellite(vt,nf);
+        prsatellite(vt,sys,nf);
         if (cycle>0) sleepms(cycle); else return;
     }
     vt_printf(vt,"\n");
@@ -1066,16 +1115,18 @@ static void cmd_satellite(char **args, int narg, vt_t *vt)
 /* observ command ------------------------------------------------------------*/
 static void cmd_observ(char **args, int narg, vt_t *vt)
 {
-    int i,nf=2,cycle=0;
+    int i,n,s,nf=3,sys=SYS_ALL,cycle=0;
     
     trace(3,"cmd_observ:\n");
     
     for (i=1;i<narg;i++) {
-        if (sscanf(args[i],"-%d",&nf)<1) cycle=(int)(atof(args[i])*1000.0);
+        if (sscanf(args[i],"-%d",&n)==1) nf=n;
+        else if ((s=parse_sysopt(args[i]))) sys=s;
+        else cycle=(int)(atof(args[i])*1000.0);
     }
     while (!vt_chkbrk(vt)) {
         if (cycle>0) vt_printf(vt,ESC_CLEAR);
-        probserv(vt,nf);
+        probserv(vt,sys,nf);
         if (cycle>0) sleepms(cycle); else return;
     }
     vt_printf(vt,"\n");
@@ -1083,15 +1134,17 @@ static void cmd_observ(char **args, int narg, vt_t *vt)
 /* navidata command ----------------------------------------------------------*/
 static void cmd_navidata(char **args, int narg, vt_t *vt)
 {
-    int cycle=0;
+    int i,s,sys=SYS_ALL,cycle=0;
     
     trace(3,"cmd_navidata:\n");
     
-    if (narg>1) cycle=(int)(atof(args[1])*1000.0);
-    
+    for (i=1;i<narg;i++) {
+        if ((s=parse_sysopt(args[i]))) sys=s;
+        else cycle=(int)(atof(args[1])*1000.0);
+    }
     while (!vt_chkbrk(vt)) {
         if (cycle>0) vt_printf(vt,ESC_CLEAR);
-        prnavidata(vt);
+        prnavidata(vt,sys);
         if (cycle>0) sleepms(cycle); else return;
     }
     vt_printf(vt,"\n");
@@ -1260,7 +1313,7 @@ static void cmd_save(char **args, int narg, vt_t *vt)
     }
     if (!confwrite(vt,file)) return;
     time2str(utc2gpst(timeget()),s,0);
-    sprintf(comment,"%s options (%s, v.%s %s)",PRGNAME,s,VER_RTKLIB,PATCH_LEVEL);
+    sprintf(comment,"%s options (%s, v.%s %s)",PRGNAME,s,VER_MALIB,PATCH_LEVEL_MALIB);
     setsysopts(&prcopt,solopt,&filopt);
     if (!saveopts(file,"w",comment,rcvopts)||!saveopts(file,"a",NULL,sysopts)) {
         vt_printf(vt,"options save error: %s\n",file);
@@ -1297,7 +1350,7 @@ static void cmd_help(char **args, int narg, vt_t *vt)
     int i;
     
     if (narg<2) {
-        vt_printf(vt,"%s (ver.%s %s)\n",PRGNAME,VER_RTKLIB,PATCH_LEVEL);
+        vt_printf(vt,"%s (ver.%s %s)\n",PRGNAME,VER_MALIB,PATCH_LEVEL_MALIB);
         for (i=0;*helptxt[i];i++) vt_printf(vt,"%s\n",helptxt[i]);
     }
     else if (strstr(str,args[1])==str) {
@@ -1342,7 +1395,7 @@ static void *con_thread(void *arg)
     trace(3,"console_thread:\n");
     
     vt_printf(con->vt,"\n%s** %s ver.%s %s console (h:help) **%s\n",ESC_BOLD,
-              PRGNAME,VER_RTKLIB,PATCH_LEVEL,ESC_RESET);
+              PRGNAME,VER_MALIB,PATCH_LEVEL_MALIB,ESC_RESET);
     
     if (!login(con->vt)) {
         vt_close(con->vt);
@@ -1436,7 +1489,7 @@ static void con_close(con_t *con)
     trace(3,"con_close:\n");
     
     if (!con) return;
-    con->state=con->vt->state=0;
+    con->state=0;
     pthread_join(con->thread,NULL);
     free(con);
 }
@@ -1505,10 +1558,10 @@ static void accept_sock(int ssock, con_t **con)
          inet_ntoa(addr.sin_addr));
 }
 /* rtkrcv main -----------------------------------------------------------------
-* sysnopsis
+* Synopsis
 *     rtkrcv [-s][-p port][-d dev][-o file][-r level][-t level][-sta sta]
 *
-* description
+* Description
 *     A command line version of the real-time positioning AP by rtklib. To start
 *     or stop RTK server, to configure options or to print solution/status,
 *     login a console and input commands. As default, /dev/tty is used for the
@@ -1520,7 +1573,7 @@ static void accept_sock(int ssock, con_t **con)
 *     set, load or save command on the console. To shutdown the program, use
 *     shutdown command on the console or send USR2 signal to the process.
 *
-* option
+* Option
 *     -s         start RTK server on program startup
 *     -p port    port number for telnet console
 *     -m port    port number for monitor stream
@@ -1530,8 +1583,9 @@ static void accept_sock(int ssock, con_t **con)
 *     -r level   output solution status file (0:off,1:states,2:residuals)
 *     -t level   debug trace level (0:off,1-5:on)
 *     -sta sta   station name for receiver dcb
+*     -v|-ver    print version
 *
-* command
+* Command
 *     start
 *       Start RTK server. No need the command if the program runs with -s
 *       option.
@@ -1603,7 +1657,7 @@ static void accept_sock(int ssock, con_t **con)
 *       Execute command by the operating system shell. Do not use the
 *       interactive command.
 *
-* notes
+* Notes
 *     Short form of a command is allowed. In case of the short form, the
 *     command is distinguished according to header characters.
 *     
@@ -1613,6 +1667,7 @@ int main(int argc, char **argv)
     con_t *con[MAXCON]={0};
     int i,start=0,port=0,outstat=0,trace=0,sock=0;
     char *dev="",file[MAXSTR]="";
+    double ee[]={2000,12,31,23,59,59};
     
     for (i=1;i<argc;i++) {
         if      (!strcmp(argv[i],"-s")) start=1;
@@ -1624,6 +1679,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i],"-r")&&i+1<argc) outstat=atoi(argv[++i]);
         else if (!strcmp(argv[i],"-t")&&i+1<argc) trace=atoi(argv[++i]);
         else if (!strcmp(argv[i],"-sta")&&i+1<argc) strcpy(sta_name,argv[++i]);
+        else if (!strcmp(argv[i],"-v")||!strcmp(argv[i],"-ver")) printver();
+        else if (!strcmp(argv[i],"-rst")&&i+2<argc) {
+            sscanf(argv[++i],"%lf/%lf/%lf",ee,ee+1,ee+2);
+            sscanf(argv[++i],"%lf:%lf:%lf",ee+3,ee+4,ee+5);
+            rst=epoch2time(ee);
+        } 
         else printusage();
     }
     if (trace>0) {
@@ -1692,9 +1753,15 @@ int main(int argc, char **argv)
     /* stop rtk server */
     stopsvr(NULL);
     
-    /* close consoles */
-    for (i=0;i<MAXCON;i++) {
-        con_close(con[i]);
+    if (port) {
+        /* close socket for remote console */
+        close(sock);
+    }
+    else {
+        /* close consoles */
+        for (i=0;i<MAXCON;i++) {
+            con_close(con[i]);
+        }
     }
     if (moniport>0) closemoni();
     if (outstat>0) rtkclosestat();

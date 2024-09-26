@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * rcvraw.c : receiver raw data functions
 *
-*          Copyright (C) 2009-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2009-2021 by T.TAKASU, All rights reserved.
 *          Copyright (C) 2014 by T.SUZUKI, All rights reserved.
 *
 * references :
@@ -12,7 +12,7 @@
 *     [3] BeiDou satellite navigation system signal in space interface control
 *         document open service signal B1I (version 3.0), February, 2019
 *     [4] Quasi-Zenith Satellite System Interface Specification Satellite
-*         Positioning, Navigation and Timing Service (IS-QZSS-PN-003), November
+*         Positioning, Navigation and Timing Service (IS-QZSS-PNT-003), November
 *         5, 2018
 *     [5] European GNSS (Galileo) Open Service Signal In Space Interface Control
 *         Document, Issue 1.3, December, 2016
@@ -48,11 +48,17 @@
 *                           update references [1], [3] and [4]
 *                           add reference [6]
 *                           use integer types in stdint.h
+*           2021/01/07 1.18 support GLONASS extended SVH and status flags
+*           2024/02/01 1.19 branch from ver.2.4.3b35 for MALIB
+*                           add support input L6E correction
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
 #define P2_8        0.00390625            /* 2^-8 */
+#define P2_9        0.001953125           /* 2^-9 */
+#define P2_14       6.103515625000000E-05 /* 2^-14 */
 #define P2_15       3.051757812500000E-05 /* 2^-15 */
+#define P2_18       3.814697265625000E-06 /* 2^-18 */
 #define P2_28       3.725290298461914E-09 /* 2^-28 */
 #define P2_34       5.820766091346740E-11 /* 2^-34 */
 #define P2_41       4.547473508864641E-13 /* 2^-41 */
@@ -166,6 +172,7 @@ static int decode_irn_eph(const uint8_t *buff, eph_t *eph)
     if      (tow1<eph_irn.toes-302400.0) week++;
     else if (tow1>eph_irn.toes+302400.0) week--;
     eph_irn.ttr=gpst2time(week,tow1);
+    eph_irn.type=0; /* ephemeris type = LNAV */
     *eph=eph_irn;
     return 1;
 }
@@ -334,6 +341,7 @@ static int decode_gal_inav_eph(const uint8_t *buff, eph_t *eph)
     eph_gal.toc=gst2time(week,toc);
     eph_gal.week=week+1024; /* gal-week = gst-week + 1024 */
     eph_gal.code=(1<<9); /* I/NAV: af0-2,Toc,SISA for E5b-E1 */
+    eph_gal.type=0; /* ephemeris type = I/NAV */
     *eph=eph_gal;
     return 1;
 }
@@ -483,6 +491,7 @@ static int decode_gal_fnav_eph(const uint8_t *buff, eph_t *eph)
     eph_gal.toc=gst2time(week[0],toc);
     eph_gal.week=week[0]+1024; /* gal-week = gst-week + 1024 */
     eph_gal.code=(1<<8); /* F/NAV: af0-af2,Toc,SISA for E5a,E1 */
+    eph_gal.type=1; /* ephemeris type = F/NAV */
     *eph=eph_gal;
     return 1;
 }
@@ -618,6 +627,7 @@ static int decode_bds_d1_eph(const uint8_t *buff, eph_t *eph)
     eph_bds.toc=bdt2gpst(bdt2time(eph_bds.week,toc_bds));
     eph_bds.code=0; /* data source = unknown */
     eph_bds.flag=1; /* nav type = IGSO/MEO */
+    eph_bds.type=0; /* ephemeris type = D1 */
     *eph=eph_bds;
     return 1;
 }
@@ -806,6 +816,7 @@ static int decode_bds_d2_eph(const uint8_t *buff, eph_t *eph)
     eph_bds.toc=bdt2gpst(bdt2time(eph_bds.week,toc_bds));
     eph_bds.code=0; /* data source = unknown */
     eph_bds.flag=2; /* nav type = GEO */
+    eph_bds.type=1; /* ephemeris type = D2 */
     *eph=eph_bds;
     return 1;
 }
@@ -896,17 +907,68 @@ extern int test_glostr(const uint8_t *buff)
     }
     return n==0||(n==2&&cs);
 }
+#if 0
+/* decode GLONASS almanac ----------------------------------------------------*/
+static int decode_glostr_alm(const uint8_t *buff, galm_t *galm)
+{
+    galm_t galm_glo={0};
+    gtime_t t_glo;
+    double ep[6]={1996,1,1};
+    int i,j,frn1,frn2,frn3,frn4,P3,N4,NA,slot,sat,ret=0;
+
+    i=1+80*2; /* string 3 */
+    frn1=getbitu(buff,i, 4); i+=4;
+    P3  =getbitu(buff,i, 1);
+    
+    i=1+80*4; /* string 5 */
+    frn2=getbitu(buff,i, 4); i+= 4;
+    NA  =getbitu(buff,i,11); i+=11+32+1;
+    N4  =getbitu(buff,i, 5);
+    
+    if (frn1!=3||frn2!=5) return 0;
+    
+    for (j=0;j<(P3?5:4);j++) {
+        i=1+80*(5+j*2); /* string 6,8,10,12,14 */
+        frn3         =getbitu(buff,i, 4);              i+= 4;
+        galm_glo.Cn  =getbitu(buff,i, 1);              i+= 1;
+        galm_glo.Mn  =getbitu(buff,i, 2);              i+= 2;
+        slot         =getbitu(buff,i, 5);              i+= 5;
+        galm_glo.taun=getbits(buff,i,10)*P2_18;        i+=10;
+        galm_glo.lamn=getbits(buff,i,21)*P2_20;        i+=21;
+        galm_glo.din =getbits(buff,i,18)*P2_20*SC2RAD; i+=18;
+        galm_glo.eccn=getbitu(buff,i,15)*P2_20;
+        
+        i=1+80*(6+j*2); /* string 7,9,11,13,15 */
+        frn4         =getbitu(buff,i, 4);              i+= 4;
+        galm_glo.omgn=getbitu(buff,i,16)*P2_15*SC2RAD; i+=16;
+        galm_glo.tn  =getbitu(buff,i,21)*P2_5;         i+=21;
+        galm_glo.dTn =getbits(buff,i,22)*P2_9;         i+=22;
+        galm_glo.ddTn=getbits(buff,i, 7)*P2_14;        i+= 7;
+        galm_glo.Hn  =getbitu(buff,i, 5);
+
+        if (frn3!=6+j*2||frn4!=7+j*2||!(sat=satno(SYS_GLO,slot))) continue;
+        
+        galm_glo.sat=sat;
+        ep[0]=1996+(N4-1)*4;
+        t_glo=timeadd(epoch2time(ep),86400.0*(NA-1)+10800.0); /* UTC+3H */
+        galm_glo.toa=timeadd(t_glo,galm_glo.tn); /* in UTC */
+        galm[slot-1]=galm_glo;
+        ret=1;
+    }
+    return ret;
+}
+#endif
 /* decode GLONASS ephemeris --------------------------------------------------*/
 static int decode_glostr_eph(const uint8_t *buff, geph_t *geph)
 {
     geph_t geph_glo={0};
     double tow,tod,tof,toe;
-    int P,P1,P2,P3,P4,tk_h,tk_m,tk_s,tb,ln,NT,slot,M,week;
+    int P,P1,P2,P3,P4,tk_h,tk_m,tk_s,tb,Bn,ln,NT,slot,M,week;
     int i=1,frn1,frn2,frn3,frn4;
     
     trace(4,"decode_glostr_eph:\n");
     
-    /* frame 1 */
+    /* string 1 */
     frn1           =getbitu(buff,i, 4);           i+= 4+2;
     P1             =getbitu(buff,i, 2);           i+= 2;
     tk_h           =getbitu(buff,i, 5);           i+= 5;
@@ -916,16 +978,16 @@ static int decode_glostr_eph(const uint8_t *buff, geph_t *geph)
     geph_glo.acc[0]=getbitg(buff,i, 5)*P2_30*1E3; i+= 5;
     geph_glo.pos[0]=getbitg(buff,i,27)*P2_11*1E3; i+=27+4;
     
-    /* frame 2 */
+    /* string 2 */
     frn2           =getbitu(buff,i, 4);           i+= 4;
-    geph_glo.svh   =getbitu(buff,i, 1);           i+= 1+2; /* MSB of Bn */
+    Bn             =getbitu(buff,i, 1);           i+= 1+2; /* MSB of Bn */
     P2             =getbitu(buff,i, 1);           i+= 1;
     tb             =getbitu(buff,i, 7);           i+= 7+5;
     geph_glo.vel[1]=getbitg(buff,i,24)*P2_20*1E3; i+=24;
     geph_glo.acc[1]=getbitg(buff,i, 5)*P2_30*1E3; i+= 5;
     geph_glo.pos[1]=getbitg(buff,i,27)*P2_11*1E3; i+=27+4;
     
-    /* frame 3 */
+    /* string 3 */
     frn3           =getbitu(buff,i, 4);           i+= 4;
     P3             =getbitu(buff,i, 1);           i+= 1;
     geph_glo.gamn  =getbitg(buff,i,11)*P2_40;     i+=11+1;
@@ -935,13 +997,13 @@ static int decode_glostr_eph(const uint8_t *buff, geph_t *geph)
     geph_glo.acc[2]=getbitg(buff,i, 5)*P2_30*1E3; i+= 5;
     geph_glo.pos[2]=getbitg(buff,i,27)*P2_11*1E3; i+=27+4;
     
-    /* frame 4 */
+    /* string 4 */
     frn4           =getbitu(buff,i, 4);           i+= 4;
     geph_glo.taun  =getbitg(buff,i,22)*P2_30;     i+=22;
     geph_glo.dtaun =getbitg(buff,i, 5)*P2_30;     i+= 5;
-    geph_glo.age   =getbitu(buff,i, 5);           i+= 5+14;
+    geph_glo.age   =getbitu(buff,i, 5);           i+= 5+14; /* E_n */
     P4             =getbitu(buff,i, 1);           i+= 1;
-    geph_glo.sva   =getbitu(buff,i, 4);           i+= 4+3;
+    geph_glo.sva   =getbitu(buff,i, 4);           i+= 4+3; /* F_T */
     NT             =getbitu(buff,i,11);           i+=11;
     slot           =getbitu(buff,i, 5);           i+= 5;
     M              =getbitu(buff,i, 2);
@@ -957,6 +1019,8 @@ static int decode_glostr_eph(const uint8_t *buff, geph_t *geph)
     }
     geph_glo.frq=0; /* set default */
     geph_glo.iode=tb;
+    geph_glo.svh=(ln<<3)+Bn; /* extended SVH */
+    geph_glo.flags=(M<<7)+(P4<<6)+(P3<<5)+(P2<<4)+(P1<<2)+P; /* status flags */
     tow=time2gpst(gpst2utc(geph->tof),&week);
     tod=fmod(tow,86400.0); tow-=tod;
     tof=tk_h*3600.0+tk_m*60.0+tk_s-10800.0; /* lt->utc */
@@ -973,11 +1037,11 @@ static int decode_glostr_eph(const uint8_t *buff, geph_t *geph)
 /* decode GLONASS UTC parameters ---------------------------------------------*/
 static int decode_glostr_utc(const uint8_t *buff, double *utc)
 {
-    int i=1+80*4; /* frame 5 */
+    int i=1+80*4; /* string 5 */
     
     trace(4,"decode_glostr_utc:\n");
     
-    /* frame 5 */
+    /* string 5 */
     if (getbitu(buff,i,4)!=5) return 0;
     i+=4+11;  
     utc[0]=getbits(buff,i,32)*P2_31; i+=32+1+6; /* tau_C */
@@ -989,12 +1053,15 @@ static int decode_glostr_utc(const uint8_t *buff, double *utc)
 * decode GLONASS navigation data string (ref [2])
 * args   : uint8_t *buff    I   GLONASS navigation data string
 *                               (w/o hamming and time mark)
-*                                 buff[ 0- 9]: string 1 (77 bits)
-*                                 buff[10-19]: string 2
-*                                 buff[20-29]: string 3
-*                                 buff[30-39]: string 4
-*                                 buff[40-49]: string 5
+*                                 buff[  0-  9]: string 1 (77 bits)
+*                                 buff[ 10- 19]: string 2
+*                                 buff[ 20- 29]: string 3
+*                                 buff[ 30- 39]: string 4
+*                                 buff[ 40- 49]: string 5
+*                                 ...
+*                                 buff[140-149]: string 15
 *          geph_t *geph     IO  GLONASS ephemeris      (NULL: not output)
+*                                 geph[slot-1]: satellite with slot ephemeris
 *          double *utc      IO  GLONASS UTC parameters (NULL: not output)
 *                                 utc[0]  : A0 (=-tau_C)
 *                                 utc[1-7]: reserved
@@ -1083,6 +1150,7 @@ static int decode_frame_eph(const uint8_t *buff, eph_t *eph)
     else if (eph_sat.toes>tow1+302400.0) eph_sat.week--;
     eph_sat.toe=gpst2time(eph_sat.week,eph_sat.toes);
     eph_sat.toc=gpst2time(eph_sat.week,toc);
+    eph_sat.type=0; /* ephemeris type = LNAV */
     *eph=eph_sat;
     return 1;
 }
@@ -1402,20 +1470,21 @@ extern void free_raw(raw_t *raw)
 /* input receiver raw data from stream -----------------------------------------
 * fetch next receiver raw data and input a message from stream
 * args   : raw_t  *raw      IO  receiver raw data control struct
+*          rtcm_t *rtcm     IO  rtcm control struct
 *          int    format    I   receiver raw data format (STRFMT_???)
 *          uint8_t data     I   stream data (1 byte)
 * return : status (-1: error message, 0: no message, 1: input observation data,
 *                  2: input ephemeris, 3: input sbas message,
 *                  9: input ion/utc parameter)
 *-----------------------------------------------------------------------------*/
-extern int input_raw(raw_t *raw, int format, uint8_t data)
+extern int input_raw(raw_t *raw, rtcm_t *rtcm, int format, uint8_t data)
 {
     trace(5,"input_raw: format=%d data=0x%02x\n",format,data);
     
     switch (format) {
         case STRFMT_OEM4  : return input_oem4  (raw,data);
         case STRFMT_OEM3  : return input_oem3  (raw,data);
-        case STRFMT_UBX   : return input_ubx   (raw,data);
+        case STRFMT_UBX   : return input_ubx   (raw,rtcm,data);
         case STRFMT_SS2   : return input_ss2   (raw,data);
         case STRFMT_CRES  : return input_cres  (raw,data);
         case STRFMT_STQ   : return input_stq   (raw,data);
@@ -1423,25 +1492,26 @@ extern int input_raw(raw_t *raw, int format, uint8_t data)
         case STRFMT_NVS   : return input_nvs   (raw,data);
         case STRFMT_BINEX : return input_bnx   (raw,data);
         case STRFMT_RT17  : return input_rt17  (raw,data);
-        case STRFMT_SEPT  : return input_sbf   (raw,data);
+        case STRFMT_SEPT  : return input_sbf   (raw,rtcm,data);
     }
     return 0;
 }
 /* input receiver raw data from file -------------------------------------------
 * fetch next receiver raw data and input a message from file
 * args   : raw_t  *raw      IO  receiver raw data control struct
+*          rtcm_t *rtcm     IO  rtcm control struct
 *          int    format    I   receiver raw data format (STRFMT_???)
 *          FILE   *fp       I   file pointer
 * return : status(-2: end of file/format error, -1...31: same as above)
 *-----------------------------------------------------------------------------*/
-extern int input_rawf(raw_t *raw, int format, FILE *fp)
+extern int input_rawf(raw_t *raw, rtcm_t *rtcm,int format, FILE *fp)
 {
     trace(4,"input_rawf: format=%d\n",format);
     
     switch (format) {
         case STRFMT_OEM4  : return input_oem4f  (raw,fp);
         case STRFMT_OEM3  : return input_oem3f  (raw,fp);
-        case STRFMT_UBX   : return input_ubxf   (raw,fp);
+        case STRFMT_UBX   : return input_ubxf   (raw,rtcm,fp);
         case STRFMT_SS2   : return input_ss2f   (raw,fp);
         case STRFMT_CRES  : return input_cresf  (raw,fp);
         case STRFMT_STQ   : return input_stqf   (raw,fp);
@@ -1449,7 +1519,7 @@ extern int input_rawf(raw_t *raw, int format, FILE *fp)
         case STRFMT_NVS   : return input_nvsf   (raw,fp);
         case STRFMT_BINEX : return input_bnxf   (raw,fp);
         case STRFMT_RT17  : return input_rt17f  (raw,fp);
-        case STRFMT_SEPT  : return input_sbff   (raw,fp);
+        case STRFMT_SEPT  : return input_sbff   (raw,rtcm,fp);
     }
     return -2;
 }

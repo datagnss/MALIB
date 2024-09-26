@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * rtkpos.c : precise positioning
 *
-*          Copyright (C) 2007-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2023 by T.TAKASU, All rights reserved.
 *
 * version : $Revision: 1.1 $ $Date: 2008/07/17 21:48:06 $
 * history : 2007/01/12 1.0  new
@@ -30,7 +30,7 @@
 *           2014/05/26 1.13 support beidou and galileo
 *                           add output of gal-gps and bds-gps time offset
 *           2014/05/28 1.14 fix bug on memory exception with many sys and freq
-*           2014/08/26 1.15 add functino to swap sol-stat file with keywords
+*           2014/08/26 1.15 add function to swap sol-stat file with keywords
 *           2014/10/21 1.16 fix bug on beidou amb-res with pos2-bdsarmode=0
 *           2014/11/08 1.17 fix bug on ar-degradation by unhealthy satellites
 *           2015/03/23 1.18 residuals referenced to reference satellite
@@ -46,6 +46,10 @@
 *                           add detecting cycle slips by L1-Lx GF phase jump
 *                           delete GLONASS IFB correction in ddres()
 *                           use integer types in stdint.h
+*           2023/01/12 1.17 valid data flags defined by carrier-phase data 
+*                           add elevation mask for rover by testelmask()
+*                           fix typos in comments
+*           2024/02/01 1.18 branch from ver.2.4.3b35 for MALIB
 *-----------------------------------------------------------------------------*/
 #include <stdarg.h>
 #include "rtklib.h"
@@ -461,7 +465,7 @@ static void udpos(rtk_t *rtk, double tt)
         for (i=0;i<3;i++) initx(rtk,rtk->sol.rr[i],VAR_POS,i);
         return;
     }
-    /* check variance of estimated postion */
+    /* check variance of estimated position */
     for (i=0;i<3;i++) var+=rtk->P[i+i*rtk->nx];
     var/=3.0;
     
@@ -789,7 +793,7 @@ static void udbias(rtk_t *rtk, double tt, const obsd_t *obs, const int *sat,
                 j++;
             }
         }
-        /* correct phase-bias offset to enssure phase-code coherency */
+        /* correct phase-bias offset to ensure phase-code coherency */
         if (j>0) {
             for (i=1;i<=MAXSAT;i++) {
                 if (rtk->x[IB(i,k,&rtk->opt)]!=0.0) rtk->x[IB(i,k,&rtk->opt)]+=offset/j;
@@ -904,6 +908,9 @@ static int zdres(int base, const obsd_t *obs, int n, const double *rs,
         /* compute geometric-range and azimuth/elevation angle */
         if ((r=geodist(rs+i*6,rr_,e+i*3))<=0.0) continue;
         if (satazel(pos,e+i*3,azel+i*2)<opt->elmin) continue;
+        
+        /* test elevation mask for rover */
+        if (!base&&testelmask(azel+i*2,opt->elmaskopt)) continue;
         
         /* excluded satellite? */
         if (satexclude(obs[i].sat,var[i],svh[i],opt)) continue;
@@ -1163,7 +1170,7 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
             
             /* set valid data flags */
             if (opt->mode>PMODE_DGPS) {
-                if (f<nf) rtk->ssat[sat[i]-1].vsat[f]=rtk->ssat[sat[j]-1].vsat[f]=1;
+                if (f>=nf) rtk->ssat[sat[i]-1].vsat[f-nf]=rtk->ssat[sat[j]-1].vsat[f-nf]=1;
             }
             else {
                 rtk->ssat[sat[i]-1].vsat[f-nf]=rtk->ssat[sat[j]-1].vsat[f-nf]=1;
@@ -1276,7 +1283,7 @@ static int ddidx(rtk_t *rtk, int *ix)
     return nb;
 }
 /* restore SD (single-differenced) ambiguity ---------------------------------*/
-static void restamb(rtk_t *rtk, const double *bias, int nb, double *xa)
+static void restamb(rtk_t *rtk, const double *bias, double *xa)
 {
     int i,n,m,f,index[MAXSAT],nv=0,nf=NF(&rtk->opt);
     
@@ -1310,9 +1317,9 @@ static void holdamb(rtk_t *rtk, const double *xa)
     
     trace(3,"holdamb :\n");
     
-    v=mat(nb,1); H=zeros(nb,rtk->nx);
+    v=mat(nb,1); H=zeros(rtk->nx,nb);
     
-    for (m=0;m<5;m++) for (f=0;f<nf;f++) {
+    for (m=0;m<6;m++) for (f=0;f<nf;f++) {
         
         for (n=i=0;i<MAXSAT;i++) {
             if (!test_sys(rtk->ssat[i].sys,m)||rtk->ssat[i].fix[f]!=2||
@@ -1350,7 +1357,7 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa)
     int i,j,nb,info,nx=rtk->nx,na=rtk->na;
     double *DP,*y,*b,*db,*Qb,*Qab,*QQ,s[2];
     int *ix;
-
+    
     trace(3,"resamb_LAMBDA : nx=%d\n",nx);
     
     rtk->sol.ratio=0.0;
@@ -1414,7 +1421,7 @@ static int resamb_LAMBDA(rtk_t *rtk, double *bias, double *xa)
                       nb,s[0]==0.0?0.0:s[1]/s[0],s[0],s[1]);
                 
                 /* restore SD ambiguity */
-                restamb(rtk,bias,nb,xa);
+                restamb(rtk,bias,xa);
             }
             else nb=0;
         }
@@ -1696,6 +1703,91 @@ extern void rtkfree(rtk_t *rtk)
     free(rtk->xa); rtk->xa=NULL;
     free(rtk->Pa); rtk->Pa=NULL;
 }
+/* signal replacement by code ------------------------------------------------*/
+static void signal_replace(obsd_t *obs, int idx, char f, char *c)
+{
+    int i,j;
+    char *code;
+
+    for(i=0;i<NFREQ+NEXOBS;i++){
+        code=code2obs(obs->code[i]);
+        for(j=0;c[j]!='\0';j++) if(code[0]==f && code[1]==c[j])break;
+        if(c[j]!='\0')break;
+    }
+    if(i<NFREQ+NEXOBS) {
+        obs->SNR[idx]=obs->SNR[i];obs->LLI[idx]=obs->LLI[i];obs->code[idx]=obs->code[i];
+        obs->L[idx]  =obs->L[i];  obs->P[idx]  =obs->P[i];  obs->D[idx]   =obs->D[i];
+    }
+    else {
+        obs->SNR[idx]=obs->LLI[idx]=obs->code[idx]=0;
+        obs->P[idx]  =obs->L[idx]  =obs->D[idx]   =0.0;
+    }
+}
+/* signal selection for PPP --------------------------------------------------*/
+static void signal_sel_ppp(obsd_t *pppobs, const nav_t *nav, const prcopt_t *opt, int ns)
+{
+    char sattype[MAXANT],satid[8],*tstr=time_str(pppobs->time, 3);
+    int  i,j,sigtype,sys;
+
+    for(i=0;i<ns;i++) {
+        sys=satsys(pppobs->sat,NULL);
+        sigtype=0; /* 0:GPS=L1C/A-L2P, GLO=G1-G2, GAL=E1-E5a, QZS=L1C-L5 */
+        strcpy(sattype,nav->pcvs[pppobs->sat-1].type);
+        for(j=strlen(sattype)-1;j>0;j--) {
+            if(sattype[j]!=' ')break;
+            sattype[j]='\0'; /* delete tail blank */
+        }
+        if      (0==strcmp(sattype,"BLOCK IIR-M")) sigtype=opt->pppsig[0]; /* 1:L1C/A-L2C */
+        else if (0==strcmp(sattype,"BLOCK IIF"  )) sigtype=opt->pppsig[1]; /* 1:L1C/A-L2C, 2:L1C/A-L5 */
+        else if (0==strcmp(sattype,"BLOCK IIIA" )) sigtype=opt->pppsig[2];
+        else if (0==strcmp(sattype,"QZSS"       )) sigtype=opt->pppsig[3]; /* 1:L1C/A-L2C */
+        else if (0==strcmp(sattype,"QZSS-2G"    )) sigtype=opt->pppsig[3];
+        else if (0==strcmp(sattype,"QZSS-2I"    )) sigtype=opt->pppsig[3];
+        else if (0==strcmp(sattype,"QZSS-2A"    )) sigtype=opt->pppsig[3];
+        else if (0==strcmp(sattype,"GALILEO-1"  )) sigtype=opt->pppsig[4];
+        else if (0==strcmp(sattype,"GALILEO-2"  )) sigtype=opt->pppsig[4];
+
+        switch (sys) {
+        case SYS_GPS:
+            signal_replace(pppobs,0,'1',"C");
+            if       (sigtype==0){  /* L1C/A-L2P */
+                signal_replace(pppobs,1,'2',"PYWCMND"); /* Note, codepries="PYWCMNDLXS" */
+            } else if(sigtype==1){  /* L1C/A-L2C */
+                signal_replace(pppobs,1,'2',"LXS");
+            } else if(sigtype==2){  /* L1C/A-L5 */
+                signal_replace(pppobs,1,'5',"QXI");
+            }
+            break;
+        case SYS_GLO:
+            signal_replace(pppobs,0,'1',"CP");
+            signal_replace(pppobs,1,'2',"PC");
+            break;
+        case SYS_GAL:
+            if (sigtype == 0) { /* E1-E5a */
+                signal_replace(pppobs,0,'1',"CBX");
+                signal_replace(pppobs,1,'5',"QXI");
+            } else if (sigtype == 1) { /* E1-E5b */
+                signal_replace(pppobs,0,'1',"CBX");
+                signal_replace(pppobs,1,'7',"QXI");
+            }
+            break;
+        case SYS_QZS:
+            if       (sigtype==0){  /* L1C-L5 */
+                signal_replace(pppobs,0,'1',"LXS");     /* Note, codepries="CLXS" */
+                signal_replace(pppobs,1,'5',"QXI");
+            } else if(sigtype==1){  /* L1C/A-L2C */
+                signal_replace(pppobs,0,'1',"C");
+                signal_replace(pppobs,1,'2',"LXS");
+            }
+            break;
+        }
+        satno2id(pppobs->sat, satid);
+        trace(3,"signal_sel_ppp %s %s %-18s code=%2d,%2d P=%13.3f,%13.3f L=%13.3f,%13.3f LLI=%d,%d SNR=%6.2f,%6.2f\n",
+            tstr,satid,sattype,pppobs->code[0],pppobs->code[1],pppobs->P[0],pppobs->P[1],pppobs->L[0],pppobs->L[1],
+            pppobs->LLI[0],pppobs->LLI[1],pppobs->SNR[0]*0.001,pppobs->SNR[1]*0.001);
+        pppobs++;
+    }
+}
 /* precise positioning ---------------------------------------------------------
 * input observation data and navigation message, compute rover position by 
 * precise positioning
@@ -1756,6 +1848,7 @@ extern void rtkfree(rtk_t *rtk)
 *-----------------------------------------------------------------------------*/
 extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
 {
+    static obsd_t pppobs[MAXOBS];
     prcopt_t *opt=&rtk->opt;
     sol_t solb={{0}};
     gtime_t time;
@@ -1765,7 +1858,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     trace(3,"rtkpos  : time=%s n=%d\n",time_str(obs[0].time,3),n);
     trace(4,"obs=\n"); traceobs(4,obs,n);
     
-    /* set base staion position */
+    /* set base station position */
     if (opt->refpos<=POSOPT_RINEX&&opt->mode!=PMODE_SINGLE&&
         opt->mode!=PMODE_MOVEB) {
         for (i=0;i<6;i++) rtk->rb[i]=i<3?opt->rb[i]:0.0;
@@ -1798,7 +1891,9 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     }
     /* precise point positioning */
     if (opt->mode>=PMODE_PPP_KINEMA) {
-        pppos(rtk,obs,nu,nav);
+        memcpy(pppobs,obs,sizeof(obsd_t)*nu);
+        signal_sel_ppp(pppobs,nav,opt,nu);
+        pppos(rtk,pppobs,nu,nav);
         outsolstat(rtk);
         return 1;
     }
@@ -1835,7 +1930,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
             return 1;
         }
     }
-    /* relative potitioning */
+    /* relative positioning */
     relpos(rtk,obs,nu,nr,nav);
     outsolstat(rtk);
     

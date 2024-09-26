@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * preceph.c : precise ephemeris and clock functions
 *
-*          Copyright (C) 2007-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2007-2021 by T.TAKASU, All rights reserved.
 *
 * references :
 *     [1] S.Hilla, The Extended Standard Product 3 Orbit Format (SP3-c),
@@ -48,6 +48,9 @@
 *                           LC defined GPS/QZS L1-L2, GLO G1-G2, GAL E1-E5b,
 *                            BDS B1I-B2I and IRN L5-S for API satantoff()
 *                           fix bug on reading SP3 file extension
+*           2021/01/14 1.18 fix bug on unable to read more than 99 satellites
+*           2021/05/21 1.19 fix invalid rollback of file pointer in readsp3h()
+*                           fix typos in comments
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -88,7 +91,7 @@ static int readsp3h(FILE *fp, gtime_t *time, char *type, int *sats,
         }
         else if (!strncmp(buff,"+ ",2)) { /* satellite id */
             if (ns==0) {
-                ns=(int)str2num(buff,4,2);
+                ns=(int)str2num(buff,3,3);
             }
             for (j=0;j<17&&k<ns;j++) {
                 sys=code2sys(buff[9+3*j]);
@@ -100,7 +103,7 @@ static int readsp3h(FILE *fp, gtime_t *time, char *type, int *sats,
             continue;
         }
         else if (!strncmp(buff,"%c",2)) { /* time system */
-            strncpy(tsys,buff+9,3); tsys[3]='\0';
+            sprintf(tsys,"%.3s",buff+9);
         }
         else if (!strncmp(buff,"%f",2)&&bfact[0]==0.0) { /* fp base number */
             bfact[0]=str2num(buff, 3,10);
@@ -113,8 +116,7 @@ static int readsp3h(FILE *fp, gtime_t *time, char *type, int *sats,
             continue;
         }
         else if (!strncmp(buff,"* ",2)) { /* first record */
-            /* roll back file pointer */
-            fseek(fp,-(long)strlen(buff),SEEK_CUR);
+            rewind(fp); /* rollback to start */
             break;
         }
     }
@@ -153,8 +155,8 @@ static void readsp3b(FILE *fp, char type, int *sats, int ns, double *bfact,
         
         if (!strncmp(buff,"EOF",3)) break;
         
+        /* skip header or invalid records */
         if (buff[0]!='*'||str2time(buff,3,28,&time)) {
-            trace(2,"sp3 invalid epoch %31.31s\n",buff);
             continue;
         }
         if (!strcmp(tsys,"UTC")) time=utc2gpst(time); /* utc->gpst */
@@ -638,7 +640,7 @@ extern void satantoff(gtime_t time, const double *rs, int sat, const nav_t *nav,
 * args   : gtime_t time       I   time (gpst)
 *          int    sat         I   satellite number
 *          nav_t  *nav        I   navigation data
-*          int    opt         I   sat postion option
+*          int    opt         I   sat position option
 *                                 (0: center of mass, 1: antenna phase center)
 *          double *rs         O   sat position and velocity (ecef)
 *                                 {x,y,z,vx,vy,vz} (m|m/s)

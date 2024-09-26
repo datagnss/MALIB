@@ -1,12 +1,14 @@
 
-The RTKLIB software package is distributed under the following BSD 2-clause
+The MALIB software package is distributed under the following BSD 2-clause
 license. Users are permitted to develop, produce or sell their own non-
-commercial or commercial products utilizing, linking or including RTKLIB as long
+commercial or commercial products utilizing, linking or including MALIB as long
 as they comply with the license.
 
 --------------------------------------------------------------------------------
 
-         Copyright (c) 2007-2020, T. Takasu, All rights reserved.
+         Copyright (c) 2007-2023, T. Takasu, All rights reserved.
+         Copyright (c) 2023-2024, Japan Aerospace Exploration Agency. All Rights Reserved.
+         Copyright (C) 2023-2024, TOSHIBA ELECTRONIC TECHNOLOGIES CORPORATION. All Rights Reserved.
 
 Redistribution and use in source and binary forms, with or without modification,
 are permitted provided that the following conditions are met:

@@ -1,21 +1,26 @@
 # makefile for rtkrcv
 
-BINDIR = /usr/local/bin
+BINDIR = ../../../../bin
 SRC    = ../../../../src
+LIBDIR  = ../../../../lib
 
-CTARGET= -DENAGLO -DENAQZS -DENACMP -DENAGAL -DENAIRN -DNFREQ=5 -DSVR_REUSEADDR
-#CTARGET= -DENAGLO -DENAQZS -DENACMP -DENAGAL -DENAIRN -DNFREQ=3 -DIERS_MODEL -DSVR_REUSEADDR
+OPTS= -DENAGLO -DENAQZS -DENACMP -DENAGAL -DENAIRN -DNFREQ=5 -DSVR_REUSEADDR -DNEXOBS=5 -DTRACE
+LIBS  =
 
-CFLAGS = -Wall -O3 -ansi -pedantic -Wno-unused-but-set-variable -I$(SRC) -I.. -DTRACE $(CTARGET) -g
-LDLIBS  = -lm -lrt -lpthread
-#LDLIBS  = ../../../lib/iers/gcc/iers.a -lm -lrt -lpthread
+# with Intel MKL
+#MKLDIR = $(LIBDIR)/mkl/intel64
+#OPTS  += -DMKL
+#LIBS  += -L$(MKLDIR) -lmkl_intel_lp64 -lmkl_core -lmkl_gnu_thread -lpthread -lgomp
+
+CFLAGS = -Wall -O3 -ansi -pedantic -Wno-unused-but-set-variable -I$(SRC) -I.. $(OPTS) -g
+LDLIBS  = $(LIBS) -lm -lrt -lpthread
 
 all        : rtkrcv
 rtkrcv     : rtkrcv.o vt.o rtkcmn.o rtksvr.o rtkpos.o geoid.o solution.o lambda.o
-rtkrcv     : sbas.o stream.o rcvraw.o rtcm.o preceph.o options.o pntpos.o ppp.o ppp_ar.o
+rtkrcv     : sbas.o stream.o rcvraw.o rtcm.o preceph.o options.o pntpos.o ppp.o ppp_ar.o ppp_corr.o
 rtkrcv     : novatel.o ublox.o ss2.o crescent.o skytraq.o javad.o nvs.o binex.o
 rtkrcv     : rt17.o ephemeris.o rinex.o ionex.o rtcm2.o rtcm3.o rtcm3e.o
-rtkrcv     : tides.o septentrio.o
+rtkrcv     : tides.o septentrio.o mdccssr.o
 
 rtkrcv.o   : ../rtkrcv.c
 	$(CC) -c $(CFLAGS) ../rtkrcv.c
@@ -57,6 +62,8 @@ ppp.o      : $(SRC)/ppp.c
 	$(CC) -c $(CFLAGS) $(SRC)/ppp.c
 ppp_ar.o   : $(SRC)/ppp_ar.c
 	$(CC) -c $(CFLAGS) $(SRC)/ppp_ar.c
+ppp_corr.o : $(SRC)/ppp_corr.c
+	$(CC) -c $(CFLAGS) $(SRC)/ppp_corr.c
 novatel.o  : $(SRC)/rcv/novatel.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/novatel.c
 ublox.o    : $(SRC)/rcv/ublox.c
@@ -85,6 +92,8 @@ tides.o    : $(SRC)/tides.c
 	$(CC) -c $(CFLAGS) $(SRC)/tides.c
 septentrio.o: $(SRC)/rcv/septentrio.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/septentrio.c
+mdccssr.o  : $(SRC)/mdccssr.c
+	$(CC) -c $(CFLAGS) $(SRC)/mdccssr.c
 
 rtkrcv.o   : $(SRC)/rtklib.h ../vt.h
 rtkcmn.o   : $(SRC)/rtklib.h
@@ -104,6 +113,7 @@ options.o  : $(SRC)/rtklib.h
 pntpos.o   : $(SRC)/rtklib.h
 ppp.o      : $(SRC)/rtklib.h
 ppp_ar.o   : $(SRC)/rtklib.h
+ppp_corr.o : $(SRC)/rtklib.h
 novatel.o  : $(SRC)/rtklib.h
 ublox.o    : $(SRC)/rtklib.h
 ss2.o      : $(SRC)/rtklib.h
@@ -118,18 +128,10 @@ ephemeris.o: $(SRC)/rtklib.h
 rinex.o    : $(SRC)/rtklib.h
 ionex.o    : $(SRC)/rtklib.h
 tides.o    : $(SRC)/rtklib.h
+mdccssr.o  : $(SRC)/rtklib.h
 
 install:
 	cp rtkrcv $(BINDIR)
-
-test1:
-	./rtkrcv -t 4 -m 52001 -t 4
-
-test2:
-	./rtkrcv -p 2105 -m 52001
-
-test3:
-	./rtkrcv -o ../rtk_pb.conf
 
 clean:
 	rm -f rtkrcv rtkrcv.exe rtkrcv.nav *.o *.out *.trace

@@ -27,6 +27,7 @@
 *    [10] F.Dilssner, The GLONASS-M satellite yaw-attitude model, Advances in
 *        Space Research, 2010
 *    [11] IGS MGEX (http://igs.org/mgex)
+*    [12] CAO IS-QZSS-MDC-002, November, 2023
 *
 * version : $Revision:$ $Date:$
 * history : 2010/07/20 1.0  new
@@ -46,7 +47,7 @@
 *                           fix bug on m2 computation in tide_pole()
 *           2015/03/19 1.7  fix bug on ionosphere correction for GLO and BDS
 *           2015/05/10 1.8  add function to detect slip by MW-LC jump
-*                           fix ppp solutin problem with large clock variance
+*                           fix ppp solution problem with large clock variance
 *           2015/06/08 1.9  add precise satellite yaw-models
 *                           cope with day-boundary problem of satellite clock
 *           2015/07/31 1.10 fix bug on nan-solution without glonass nav-data
@@ -59,6 +60,11 @@
 *           2018/10/10 1.13 support api change of satexclude()
 *           2020/11/30 1.14 use sat2freq() to get carrier frequency
 *                           use E1-E5b for Galileo iono-free LC
+*           2021/01/04 1.15 fixed divide-by-zero exception in udbias_ppp()
+*           2024/02/01 1.16 branch from ver.2.4.3b35 for MALIB
+*                           add function to support constrains to local correction
+*                           change for suppress -Wstringop-overflow warnings.
+*           2024/08/02 1.17 add sat elevation argument for pppcorr_stec()
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -67,6 +73,8 @@
 #define MAX(x,y)    ((x)>(y)?(x):(y))
 #define MIN(x,y)    ((x)<(y)?(x):(y))
 #define ROUND(x)    (int)floor((x)+0.5)
+
+#define PPP_NFREQ   2               /* number of freq. for PPP */
 
 #define MAX_ITER    8               /* max number of iterations */
 #define MAX_STD_FIX 0.15            /* max std-dev (3d) to fix solution */
@@ -372,11 +380,13 @@ static void corr_meas(const obsd_t *obs, const nav_t *nav, const double *azel,
                       const double *dants, double phw, double *L, double *P,
                       double *Lc, double *Pc)
 {
-    double freq[NFREQ]={0},C1,C2;
-    int i,sys=satsys(obs->sat,NULL);
+    char satid[8],*tstr=time_str(obs->time, 3);
+    double freq[2]={0},C1,C2,cb,pb;
+    int i,sys=satsys(obs->sat,NULL),ssrcode=CODE_NONE;
     
-    for (i=0;i<NFREQ;i++) {
-        L[i]=P[i]=0.0;
+    satno2id(obs->sat, satid);
+    for (i=0;i<2;i++) {
+        L[i]=P[i]=cb=pb=0.0;
         freq[i]=sat2freq(obs->sat,obs->code[i],nav);
         if (freq[i]==0.0||obs->L[i]==0.0||obs->P[i]==0.0) continue;
         if (testsnr(0,0,azel[1],obs->SNR[i]*SNR_UNIT,&opt->snrmask)) continue;
@@ -387,10 +397,32 @@ static void corr_meas(const obsd_t *obs, const nav_t *nav, const double *azel,
         
         /* P1-C1,P2-C2 dcb correction (C1->P1,C2->P2) */
         if (sys==SYS_GPS||sys==SYS_GLO) {
-            if (obs->code[i]==CODE_L1C) P[i]+=nav->cbias[obs->sat-1][1];
-            if (obs->code[i]==CODE_L2C) P[i]+=nav->cbias[obs->sat-1][2];
+            if (obs->code[i]==CODE_L1C) cb=nav->cbias[obs->sat-1][1];
+            if (obs->code[i]==CODE_L2C) cb=nav->cbias[obs->sat-1][2];
+        }
+
+        /* SSR cbias, pbias correction */
+        ssrcode = mcssr_sel_biascode(sys, obs->code[i]);
+        if((cb==0.0) && (ssrcode != CODE_NONE)) {
+            if(nav->ssr[obs->sat-1].cbias[ssrcode-1]!=0.0) cb=nav->ssr[obs->sat-1].cbias[ssrcode-1];
+            if(nav->ssr[obs->sat-1].pbias[ssrcode-1]!=0.0) pb=nav->ssr[obs->sat-1].pbias[ssrcode-1];
+        }
+        if(cb!=0.0) {
+            P[i]+=cb;
+            trace(3,"corr_meas cbias %s %s obscode=%2d ssrcode=%2d cbias=%7.3f\n",
+                tstr,satid,obs->code[i],ssrcode,cb);
+        }
+        if(pb!=0.0) {
+            /* Note, In ref [12] section 5.5.3.3,
+               it is also additive in code bias,
+               but for compatibility with conventional processing,
+               negative values are retained and subtracted. */
+            L[i]-=pb;
+            trace(3,"corr_meas pbias %s %s obscode=%2d ssrcode=%2d pbias=%7.3f\n",
+                tstr,satid,obs->code[i],ssrcode,pb);
         }
     }
+
     /* iono-free LC */
     *Lc=*Pc=0.0;
     if (freq[0]==0.0||freq[1]==0.0) return;
@@ -407,7 +439,9 @@ static void detslp_ll(rtk_t *rtk, const obsd_t *obs, int n)
     
     trace(3,"detslp_ll: n=%d\n",n);
     
-    for (i=0;i<n&&i<MAXOBS;i++) for (j=0;j<rtk->opt.nf;j++) {
+    /* Note, When using gcc, use constants to suppress
+             -Wstringop-overflow warnings. */
+    for (i=0;i<n&&i<MAXOBS;i++) for (j=0;j<PPP_NFREQ;j++) {
         if (obs[i].L[j]==0.0||!(obs[i].LLI[j]&3)) continue;
         
         trace(3,"detslp_ll: slip detected sat=%2d f=%d\n",obs[i].sat,j+1);
@@ -436,7 +470,8 @@ static void detslp_gf(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
             trace(3,"detslip_gf: slip detected sat=%2d gf=%8.3f->%8.3f\n",
                   obs[i].sat,g0,g1);
             
-            for (j=0;j<rtk->opt.nf;j++) rtk->ssat[obs[i].sat-1].slip[j]|=1;
+            /* Note, Use constants to align concept with detslp_ll() */
+            for (j=0;j<PPP_NFREQ;j++) rtk->ssat[obs[i].sat-1].slip[j]|=1;
         }
     }
 }
@@ -454,13 +489,14 @@ static void detslp_mw(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
         w0=rtk->ssat[obs[i].sat-1].mw[0];
         rtk->ssat[obs[i].sat-1].mw[0]=w1;
         
-        trace(4,"detslip_mw: sat=%2d mw0=%8.3f mw1=%8.3f\n",obs[i].sat,w0,w1);
+        trace(4,"detslp_mw: sat=%2d mw0=%8.3f mw1=%8.3f\n",obs[i].sat,w0,w1);
         
         if (w0!=0.0&&fabs(w1-w0)>THRES_MW_JUMP) {
-            trace(3,"detslip_mw: slip detected sat=%2d mw=%8.3f->%8.3f\n",
+            trace(3,"detslp_mw: slip detected sat=%2d mw=%8.3f->%8.3f\n",
                   obs[i].sat,w0,w1);
             
-            for (j=0;j<rtk->opt.nf;j++) rtk->ssat[obs[i].sat-1].slip[j]|=1;
+            /* Note, Use constants to align concept with detslp_ll() */
+            for (j=0;j<PPP_NFREQ;j++) rtk->ssat[obs[i].sat-1].slip[j]|=1;
         }
     }
 }
@@ -645,7 +681,7 @@ static void uddcb_ppp(rtk_t *rtk)
 static void udbias_ppp(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
 {
     double L[NFREQ],P[NFREQ],Lc,Pc,bias[MAXOBS],offset=0.0,pos[3]={0};
-    double freq1,freq2,ion,dantr[NFREQ]={0},dants[NFREQ]={0};
+    double freq1,freq2,freq3,ion,dantr[NFREQ]={0},dants[NFREQ]={0};
     int i,j,k,f,sat,slip[MAXOBS]={0},clk_jump=0;
     
     trace(3,"udbias  : n=%d\n",n);
@@ -691,13 +727,15 @@ static void udbias_ppp(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
             }
             else if (L[f]!=0.0&&P[f]!=0.0) {
                 freq1=sat2freq(sat,obs[i].code[0],nav);
-                freq2=sat2freq(sat,obs[i].code[f],nav);
+                freq2=sat2freq(sat,obs[i].code[1],nav);
+                freq3=sat2freq(sat,obs[i].code[f],nav);
                 slip[i]=rtk->ssat[sat-1].slip[f];
-                if (obs[i].P[0]==0.0||obs[i].P[1]==0.0||freq1==0.0||freq2==0.0) {
+                if (obs[i].P[0]==0.0||obs[i].P[1]==0.0||obs[i].P[f]==0.0||
+                    freq1==0.0||freq2==0.0||freq3==0.0) {
                     continue;
                 }
-                ion=(obs[i].P[0]-obs[i].P[f])/(1.0-SQR(freq1/freq2));
-                bias[i]=L[f]-P[f]+2.0*ion*SQR(freq1/freq2);
+                ion=(obs[i].P[0]-obs[i].P[1])/(1.0-SQR(freq1/freq2));
+                bias[i]=L[f]-P[f]+2.0*ion*SQR(freq1/freq3);
             }
             if (rtk->x[j]==0.0||slip[i]||bias[i]==0.0) continue;
             
@@ -854,6 +892,55 @@ static int model_iono(gtime_t time, const double *pos, const double *azel,
     }
     return 0;
 }
+/* constraint to local correction --------------------------------------------*/
+static int const_corr(const obsd_t *obs, int n, const int *exc,
+                      const nav_t *nav, const double *x, const double *pos,
+                      const double *azel, rtk_t *rtk, double *v, double *H,
+                      double *var)
+{
+    gtime_t time=obs[0].time;
+    double trop[3],std_trop[3],iono[MAXSAT],std_iono[MAXSAT];
+    int i,j,k,sat,nv=0;
+    double el[MAXSAT]={0};
+    char str[32];
+
+    time2str(obs[0].time,str,2);
+    /* constraint to external troposphere correction */
+    if ((rtk->opt.tropopt==TROPOPT_EST||rtk->opt.tropopt==TROPOPT_ESTG)&&
+        pppcorr_trop(&nav->pppcorr,time,pos,trop,std_trop)) {
+        
+        for (i=0;i<(rtk->opt.tropopt==TROPOPT_EST?1:3);i++) {
+            if (std_trop[i]==0.0) continue;
+            j=IT(&rtk->opt)+i;
+            v[nv]=trop[i]-x[j];
+            for (k=0;k<rtk->nx;k++) H[k+nv*rtk->nx]=k==j?1.0:0.0;
+            var[nv]=SQR(std_trop[i]);
+            trace(4,"%s trop [%d] res=%9.4f sig=%9.4f\n",str,i,
+                  v[nv],sqrt(var[nv]));
+            nv++;
+        }
+    }
+    /* constraint to external ionosphere correction */
+    for (i=0;i<n;i++) el[obs[i].sat-1]=azel[i*2+1];
+    if (rtk->opt.ionoopt==IONOOPT_EST&&
+        pppcorr_stec(&nav->pppcorr,time,pos,el,iono,std_iono)) {
+        
+        for (i=0;i<n;i++) {
+            sat=obs[i].sat;
+            if (exc[i]||iono[sat-1]==0.0||std_iono[sat-1]>0.5) continue;
+            j=II(sat,&rtk->opt);
+            v[nv]=iono[sat-1]-x[j];
+            for (k=0;k<rtk->nx;k++) H[k+nv*rtk->nx]=k==j?1.0:0.0;
+            var[nv]=SQR(std_iono[sat-1]);
+            trace(4,"%s stec sat=%2d res=%9.4f sig=%9.4f el=%4.1f\n",str,sat,
+                  v[nv],sqrt(var[nv]),el[sat-1]*R2D);
+            nv++;
+        }
+    }
+    trace(3,"%s local nv=%d\n",str,nv);
+
+    return nv;
+}
 /* phase and code residuals --------------------------------------------------*/
 static int ppp_res(int post, const obsd_t *obs, int n, const double *rs,
                    const double *dts, const double *var_rs, const int *svh,
@@ -881,7 +968,8 @@ static int ppp_res(int post, const obsd_t *obs, int n, const double *rs,
         sat=obs[i].sat;
         
         if ((r=geodist(rs+i*6,rr,e))<=0.0||
-            satazel(pos,e,azel+i*2)<opt->elmin) {
+            satazel(pos,e,azel+i*2)<opt->elmin||
+            testelmask(azel+i*2,opt->elmaskopt)) {
             exc[i]=1;
             continue;
         }
@@ -994,6 +1082,9 @@ static int ppp_res(int post, const obsd_t *obs, int n, const double *rs,
         exc[maxobs]=1; rtk->ssat[sat-1].rejc[maxfrq%2]++; stat=0;
         ve[rej]=0;
     }
+    /* constraint to local correction */
+    nv+=const_corr(obs,n,exc,nav,x,pos,azel,rtk,v+nv,H+nv*rtk->nx,var+nv);
+    
     for (i=0;i<nv;i++) for (j=0;j<nv;j++) {
         R[i+j*nv]=i==j?var[i]:0.0;
     }

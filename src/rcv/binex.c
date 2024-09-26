@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------------
 * BINEX.c : BINEX dependent functions
 *
-*          Copyright (C) 2013-2020 by T.TAKASU, All rights reserved.
+*          Copyright (C) 2013-2023 by T.TAKASU, All rights reserved.
 *
 * reference :
 *     [1] UNAVCO, BINEX: Binary exchange format (updated on July 13, 2018)
@@ -30,6 +30,10 @@
 *                           use API code2idx() to get frequency index
 *                           use API code2idx() to get carrier frequency
 *                           use integer types in stdint.h
+*           2021/01/06 1.12 support GLONASS extended SVH in ephemeris (0x01-02)
+*           2021/02/17 1.13 fix bug on reading unsupported sat data in 0x7f-05
+*           2021/04/08 1.14 fix bug on 100 nsec time-tag error in in 0x7f-05
+*           2023/01/12 1.15 support ephemeris type in eph_t
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -280,6 +284,7 @@ static int decode_bnx_01_01(raw_t *raw, uint8_t *buff, int len)
         return -1;
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
     eph.A=SQR(sqrtA);
     eph.toe=gpst2time(eph.week,eph.toes);
     eph.toc=gpst2time(eph.week,eph.toes);
@@ -324,7 +329,7 @@ static int decode_bnx_01_02(raw_t *raw, uint8_t *buff, int len)
         geph.pos[2]=R8(p)*1E3; p+=8;
         geph.vel[2]=R8(p)*1E3; p+=8;
         geph.acc[2]=R8(p)*1E3; p+=8;
-        geph.svh   =U1(p)&0x1; p+=1; /* MSB of Bn */
+        geph.svh   =U1(p)&7;   p+=1; /* extended SVH (Cn_a+Cn+Bn) */
         geph.frq   =I1(p);     p+=1;
         geph.age   =U1(p);     p+=1;
         leap       =U1(p);     p+=1;
@@ -461,6 +466,7 @@ static int decode_bnx_01_04(raw_t *raw, uint8_t *buff, int len)
     if (!(eph_sel&2)&&set==1) return 0;
     
     eph.sat=sat;
+    eph.type=set; /* ephemeris type = I/NAV or F/NAV */
     eph.A=SQR(sqrtA);
     eph.iodc=eph.iode;
     eph.toe=gpst2time(eph.week,eph.toes);
@@ -531,6 +537,7 @@ static int decode_bnx_01_05(raw_t *raw, uint8_t *buff, int len)
         return 0;
     }
     eph.sat=sat;
+    eph.type=(prn>=6&&prn<=58)?0:1; /* ephemeris type = D1 or D2 */
     eph.A=SQR(sqrtA);
     eph.toe=gpst2time(eph.week+1356,eph.toes+14.0); /* bdt -> gpst */
     eph.toc=gpst2time(eph.week+1356,eph.toes+14.0); /* bdt -> gpst */
@@ -602,6 +609,7 @@ static int decode_bnx_01_06(raw_t *raw, uint8_t *buff, int len)
         return 0;
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
     eph.A=SQR(sqrtA);
     eph.toe=gpst2time(eph.week,eph.toes);
     eph.toc=gpst2time(eph.week,eph.toes);
@@ -665,6 +673,7 @@ static int decode_bnx_01_07(raw_t *raw, uint8_t *buff, int len)
         return 0;
     }
     eph.sat=sat;
+    eph.type=0; /* ephemeris type = LNAV */
     eph.A=SQR(sqrtA);
     eph.toe=gpst2time(eph.week,eph.toes);
     eph.toc=adjweek(eph.toe,toc);
@@ -741,6 +750,7 @@ static int decode_bnx_01_14(raw_t *raw, uint8_t *buff, int len)
     if (!(eph_sel&2)&&set==1) return 0;
     
     eph.sat=sat;
+    eph.type=set; /* ephemeris type = I/NAV or F/NAV */
     eph.A=SQR(sqrtA);
     eph.iodc=eph.iode;
     eph.toe=gpst2time(eph.week,eph.toes);
@@ -842,21 +852,27 @@ static uint8_t *decode_bnx_7f_05_obs(raw_t *raw, uint8_t *buff, int sat,
 {
     const uint8_t codes_gps[32]={
         CODE_L1C ,CODE_L1C ,CODE_L1P ,CODE_L1W ,CODE_L1Y ,CODE_L1M , /*  0- 5 */
-        CODE_L1X ,CODE_L1N ,CODE_NONE,CODE_NONE,CODE_L2W ,CODE_L2C , /*  6-11 */
+        CODE_L1L ,CODE_L1N ,CODE_L1S ,CODE_L1X ,CODE_L2W ,CODE_L2C , /*  6-11 */
         CODE_L2D ,CODE_L2S ,CODE_L2L ,CODE_L2X ,CODE_L2P ,CODE_L2W , /* 12-17 */
         CODE_L2Y ,CODE_L2M ,CODE_L2N ,CODE_NONE,CODE_NONE,CODE_L5X , /* 18-23 */
-        CODE_L5I ,CODE_L5Q ,CODE_L5X                                 /* 24-26 */
+        CODE_L5I ,CODE_L5Q ,CODE_L5X ,CODE_NONE,CODE_NONE,CODE_NONE, /* 24-29 */
+        CODE_NONE,CODE_NONE                                          /* 30-31 */
     };
     const uint8_t codes_glo[32]={
-        CODE_L1C ,CODE_L1C ,CODE_L1P ,CODE_NONE,CODE_NONE,CODE_NONE, /*  0- 5 */
-        CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE,CODE_L2C ,CODE_L2C , /*  6-11 */
-        CODE_L2P ,CODE_L3X ,CODE_L3I ,CODE_L3Q ,CODE_L3X             /* 12-16 */
+        CODE_L1C ,CODE_L1C ,CODE_L1P ,CODE_NONE,CODE_NONE,CODE_L4A , /*  0- 5 */
+        CODE_L4B ,CODE_L4X ,CODE_NONE,CODE_NONE,CODE_L2C ,CODE_L2C , /*  6-11 */
+        CODE_L2P ,CODE_L3X ,CODE_L3I ,CODE_L3Q ,CODE_L3X ,CODE_NONE, /* 12-17 */
+        CODE_NONE,CODE_L6X ,CODE_L6A ,CODE_L6B ,CODE_L6X ,CODE_NONE, /* 18-23 */
+        CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE, /* 24-29 */
+        CODE_NONE,CODE_NONE                                          /* 30-31 */
     };
     const uint8_t codes_gal[32]={
         CODE_L1C ,CODE_L1A ,CODE_L1B ,CODE_L1C ,CODE_L1X ,CODE_L1Z , /*  0- 5 */
         CODE_L5X ,CODE_L5I ,CODE_L5Q ,CODE_L5X ,CODE_L7X ,CODE_L7I , /*  6-11 */
         CODE_L7Q ,CODE_L7X ,CODE_L8X ,CODE_L8I ,CODE_L8Q ,CODE_L8X , /* 12-17 */
         CODE_L6X ,CODE_L6A ,CODE_L6B ,CODE_L6C ,CODE_L6X ,CODE_L6Z , /* 18-23 */
+        CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE, /* 24-29 */
+        CODE_NONE,CODE_NONE                                          /* 30-31 */
     };
     const uint8_t codes_sbs[32]={
         CODE_L1C ,CODE_L1C ,CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE, /*  0- 5 */
@@ -866,16 +882,17 @@ static uint8_t *decode_bnx_7f_05_obs(raw_t *raw, uint8_t *buff, int sat,
         CODE_L2X ,CODE_L2I ,CODE_L2Q ,CODE_L2X ,CODE_L7X ,CODE_L7I , /*  0- 5 */
         CODE_L7Q ,CODE_L7X ,CODE_L6X ,CODE_L6I ,CODE_L6Q ,CODE_L6X , /*  6-11 */
         CODE_L1X ,CODE_L1D ,CODE_L1P ,CODE_L1X ,CODE_L5X ,CODE_L5D , /* 12-17 */
-        CODE_L5P ,CODE_L5X ,CODE_L7Z ,CODE_L7D ,CODE_L7P ,CODE_L7Z   /* 18-23 */
-        /* 20-23: extension for BD990 F/W 5.48 */
+        CODE_L5P ,CODE_L5X ,CODE_L1S ,CODE_L1L ,CODE_L1Z ,CODE_L7D , /* 18-23 */
+        CODE_L7P ,CODE_L7Z ,CODE_L8D ,CODE_L8P ,CODE_L8X ,CODE_L6D , /* 24-29 */
+        CODE_L6P ,CODE_L6Z                                           /* 30-31 */
     };
     const uint8_t codes_qzs[32]={
         CODE_L1C ,CODE_L1C ,CODE_L1S ,CODE_L1L ,CODE_L1X ,CODE_NONE, /*  0- 5 */
         CODE_NONE,CODE_L2X ,CODE_L2S ,CODE_L2L ,CODE_L2X ,CODE_NONE, /*  6-11 */
         CODE_NONE,CODE_L5X ,CODE_L5I ,CODE_L5Q ,CODE_L5X ,CODE_NONE, /* 12-17 */
-        CODE_NONE,CODE_L6X ,CODE_L6S ,CODE_L6L ,CODE_L6X ,CODE_NONE, /* 18-23 */
-        CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE,CODE_NONE, /* 24-29 */
-        CODE_L1Z                                                     /* 30-30 */
+        CODE_NONE,CODE_L6X ,CODE_L6S ,CODE_L6L ,CODE_L6X ,CODE_L6E , /* 18-23 */
+        CODE_L6Z ,CODE_L5D ,CODE_L5P ,CODE_L5Z ,CODE_NONE,CODE_NONE, /* 24-29 */
+        CODE_L1Z ,CODE_L1B                                           /* 30-31 */
     };
     const uint8_t codes_irn[32]={
         CODE_L5X ,CODE_L5A ,CODE_L5B ,CODE_L5C ,CODE_L5X ,CODE_L9X , /*  0- 5 */
@@ -900,7 +917,7 @@ static uint8_t *decode_bnx_7f_05_obs(raw_t *raw, uint8_t *buff, int sat,
         case SYS_SBS: codes=codes_sbs; break;
         case SYS_CMP: codes=codes_cmp; break;
         case SYS_IRN: codes=codes_irn; break;
-        default: return 0;
+        default: codes=NULL; break; /* skip unsupported sat data */
     }
     for (i=0;i<nobs;i++) {
         flag   =getbitu(p,0,1);
@@ -1088,7 +1105,8 @@ static int decode_bnx_7f(raw_t *raw, uint8_t *buff, int len)
     srec=U1(p); p+=1; /* subrecord ID */
     min =U4(p); p+=4;
     msec=U2(p); p+=2;
-    raw->time=timeadd(epoch2time(gpst0),min*60.0+msec*0.001);
+    raw->time=timeadd(epoch2time(gpst0),min*60.0);
+    raw->time=timeadd(raw->time,msec*0.001);
     
     if (raw->outtype) {
         msg=raw->msgtype+strlen(raw->msgtype);

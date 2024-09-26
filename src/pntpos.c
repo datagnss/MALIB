@@ -23,6 +23,10 @@
 *                           use E1-E5b for Galileo dual-freq iono-correction
 *                           use API sat2freq() to get carrier frequency
 *                           add output of velocity estimation error in estvel()
+*           2021/05/21 1.8  fix bug on missing initializations in rescode()
+*                           fix bug on ionosphere error variance in rescode()
+*           2024/02/01 1.9  branch from ver.2.4.3b35 for MALIB
+*                           add ignore chi-square error
 *-----------------------------------------------------------------------------*/
 #include "rtklib.h"
 
@@ -249,7 +253,8 @@ static int rescode(int iter, const obsd_t *obs, int n, const double *rs,
                    double *resp, int *ns)
 {
     gtime_t time;
-    double r,freq,dion,dtrp,vmeas,vion,vtrp,rr[3],pos[3],dtr,e[3],P;
+    double r,freq,dion=0.0,dtrp=0.0,vmeas,vion=0.0,vtrp=0.0,rr[3],pos[3],dtr;
+    double e[3],P,fact_ion;
     int i,j,nv=0,sat,sys,mask[NX-3]={0};
     
     trace(3,"resprng : n=%d\n",n);
@@ -278,8 +283,11 @@ static int rescode(int iter, const obsd_t *obs, int n, const double *rs,
         if ((r=geodist(rs+i*6,rr,e))<=0.0) continue;
         
         if (iter>0) {
-            /* test elevation mask */
+            /* test minimum elevation */
             if (satazel(pos,e,azel+i*2)<opt->elmin) continue;
+            
+            /* test elevation mask */
+            if (testelmask(azel+i*2,opt->elmaskopt)) continue;
             
             /* test SNR mask */
             if (!snrmask(obs+i,azel+i*2,opt)) continue;
@@ -289,8 +297,9 @@ static int rescode(int iter, const obsd_t *obs, int n, const double *rs,
                 continue;
             }
             if ((freq=sat2freq(sat,obs[i].code[0],nav))==0.0) continue;
-            dion*=SQR(FREQ1/freq);
-            vion*=SQR(FREQ1/freq);
+            fact_ion=SQR(FREQ1/freq);
+            dion*=fact_ion;
+            vion*=SQR(fact_ion);
             
             /* tropospheric correction */
             if (!tropcorr(time,nav,pos,azel+i*2,opt->tropopt,&dtrp,&vtrp)) {
@@ -348,7 +357,8 @@ static int valsol(const double *azel, const int *vsat, int n,
     vv=dot(v,v,nv);
     if (nv>nx&&vv>chisqr[nv-nx-1]) {
         sprintf(msg,"chi-square error nv=%d vv=%.1f cs=%.1f",nv,vv,chisqr[nv-nx-1]);
-        return 0;
+        if(!opt->ign_chierr)return 0;
+        trace(2,"ignore %s\n",msg);
     }
     /* large GDOP check */
     for (i=ns=0;i<n;i++) {
@@ -358,6 +368,8 @@ static int valsol(const double *azel, const int *vsat, int n,
         ns++;
     }
     dops(ns,azels,opt->elmin,dop);
+    trace(4,"valsol  : n=%d nv=%d vv=%.1f cs=%.1f maxgdop=%.1f gdop=%.1f pdop=%.1f hdop=%.1f vdop=%.1f\n",
+        n,nv,vv,chisqr[nv-nx-1],opt->maxgdop,dop[0],dop[1],dop[2],dop[3]);
     if (dop[0]<=0.0||dop[0]>opt->maxgdop) {
         sprintf(msg,"gdop error nv=%d gdop=%.1f",nv,dop[0]);
         return 0;
