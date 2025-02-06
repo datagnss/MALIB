@@ -461,6 +461,7 @@ extern "C" {
 #define STRFMT_SBAS  16                 /* stream format: SBAS messages */
 #define STRFMT_NMEA  17                 /* stream format: NMEA 0183 */
 #define STRFMT_L6E   21                 /* stream format: L6E CSSR */
+#define STRFMT_DGS   22                 /* stream format: DATAGNSS QZS-6C */
 #define MAXRCVFMT    12                 /* max number of receiver format */
 
 #define STR_MODE_R  0x1                 /* stream mode: read */
@@ -1633,6 +1634,8 @@ int input_nvsf(raw_t *raw, FILE *fp);
 int input_bnxf(raw_t *raw, FILE *fp);
 int input_rt17f(raw_t *raw, FILE *fp);
 int input_sbff(raw_t *raw, rtcm_t *rtcm, FILE *fp);
+int input_dgs_f(raw_t *raw, rtcm_t *rtcm, FILE *fp);
+int input_dgs(raw_t *raw, rtcm_t *rtcm, uint8_t data);
 
 int gen_ubx(const char *msg, uint8_t *buff);
 int gen_stq(const char *msg, uint8_t *buff);

@@ -1,4 +1,5 @@
 *.o
+*.out
 *.d
 *.obs
 *.ini
@@ -9,3 +10,12 @@ Debug
 Debug_Build
 __history
 __astcache
+bin/rtkrcv
+bin/rtkrcv.nav
+data/igs14.atx
+*.rtcm3
+*.dgs
+*.rtcm3.tag
+*.dgs.tag
+data/out
+data/REPLAY_DATA_FOR_QZS6C

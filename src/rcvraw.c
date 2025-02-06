@@ -1493,9 +1493,11 @@ extern int input_raw(raw_t *raw, rtcm_t *rtcm, int format, uint8_t data)
         case STRFMT_BINEX : return input_bnx   (raw,data);
         case STRFMT_RT17  : return input_rt17  (raw,data);
         case STRFMT_SEPT  : return input_sbf   (raw,rtcm,data);
+        case STRFMT_DGS   : return input_dgs   (raw,rtcm,data);
     }
     return 0;
 }
+
 /* input receiver raw data from file -------------------------------------------
 * fetch next receiver raw data and input a message from file
 * args   : raw_t  *raw      IO  receiver raw data control struct
@@ -1520,6 +1522,7 @@ extern int input_rawf(raw_t *raw, rtcm_t *rtcm,int format, FILE *fp)
         case STRFMT_BINEX : return input_bnxf   (raw,fp);
         case STRFMT_RT17  : return input_rt17f  (raw,fp);
         case STRFMT_SEPT  : return input_sbff   (raw,rtcm,fp);
+        case STRFMT_DGS   : return input_dgs_f   (raw,rtcm,fp);
     }
     return -2;
 }

@@ -18,7 +18,7 @@ LDLIBS  = $(LIBS) -lm -lrt -lpthread
 all        : rtkrcv
 rtkrcv     : rtkrcv.o vt.o rtkcmn.o rtksvr.o rtkpos.o geoid.o solution.o lambda.o
 rtkrcv     : sbas.o stream.o rcvraw.o rtcm.o preceph.o options.o pntpos.o ppp.o ppp_ar.o ppp_corr.o
-rtkrcv     : novatel.o ublox.o ss2.o crescent.o skytraq.o javad.o nvs.o binex.o
+rtkrcv     : novatel.o ublox.o ss2.o crescent.o skytraq.o javad.o nvs.o dgs.o binex.o
 rtkrcv     : rt17.o ephemeris.o rinex.o ionex.o rtcm2.o rtcm3.o rtcm3e.o
 rtkrcv     : tides.o septentrio.o mdccssr.o
 
@@ -68,6 +68,8 @@ novatel.o  : $(SRC)/rcv/novatel.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/novatel.c
 ublox.o    : $(SRC)/rcv/ublox.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/ublox.c
+dgs.o      : $(SRC)/rcv/dgs.c
+	$(CC) -c $(CFLAGS) $(SRC)/rcv/dgs.c
 ss2.o      : $(SRC)/rcv/ss2.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/ss2.c
 crescent.o : $(SRC)/rcv/crescent.c
@@ -116,6 +118,7 @@ ppp_ar.o   : $(SRC)/rtklib.h
 ppp_corr.o : $(SRC)/rtklib.h
 novatel.o  : $(SRC)/rtklib.h
 ublox.o    : $(SRC)/rtklib.h
+dgs.o      : $(SRC)/rtklib.h
 ss2.o      : $(SRC)/rtklib.h
 crescent.o : $(SRC)/rtklib.h
 skytraq.o  : $(SRC)/rtklib.h
