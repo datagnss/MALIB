@@ -182,6 +182,13 @@ inpstr1-path       =datapath/dataname.rtcm3::T::x10::+30
 > ```pos1-sateph        =brdc+ssrapc```\
 > then, ``` pos2-ign_chierr = on ```
 
+### For QZS-6C [DATAGNSS](https://www.datagnss.com/collections/evk/products/qzss-l6-receiver)
+
+```
+# Input stream format (0:rtcm2,1:rtcm3,2:oem4,3:oem3,4:ubx,5:ss2,6:hemis,7:skytraq,8:javad,9:nvs,10:binex,11:rt17,12:sbf,14:sp3,21:l6e,22:dgs)
+inpstr3-format=dgs
+```
+
 ## CUI (rtkrcv/rnx2rtkp)
 
 ### rtkrcv : Real-time Positioning
